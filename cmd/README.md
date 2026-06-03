@@ -50,6 +50,7 @@ se záměrně nevytvoří a úloha skončí chybou (vidět v **Systém → Plán
 |---|---|
 | `publish.{sh,ps1}` | `cd web && pnpm install && pnpm build` — produkční build frontendu do `web/dist/` (před commitem nebo nasazením na produkční IIS / Apache) |
 | `test.{sh,ps1}`    | `cd api && vendor/bin/phpunit` — spustí testovou sadu (94 testů, ~1 s). Lze passnout filter / testsuite (`cmd/test.sh --filter=GpcParser`) |
+| `update-nix-hashes.sh` | Přepočítá FOD hashe ve `flake.nix` (pnpm deps + composer vendorHash) po změně lockfile. Lokální obdoba workflow `update-nix-hashes.yml`. Volitelně jen `web` nebo `vendor`. **Jen `.sh`** — Nix neběží na nativním Windows. |
 
 ## Cron — doporučené frekvence
 

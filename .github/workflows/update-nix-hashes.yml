@@ -1,0 +1,53 @@
+name: Update Nix hashes
+
+# Self-service: udržuje fixed-output hashe ve flake.nix zelené, aniž by se jich
+# kdokoli dotýkal ručně. Spustí se, když se změní lockfile (nebo manuálně),
+# přepočítá pnpm + composer hash a otevře PR.
+on:
+  push:
+    branches: [master]
+    paths:
+      - web/pnpm-lock.yaml
+      - api/composer.lock
+      - flake.nix
+  workflow_dispatch:
+
+concurrency:
+  group: update-nix-hashes
+  cancel-in-progress: true
+
+permissions:
+  contents: write
+  pull-requests: write
+
+jobs:
+  update-hashes:
+    name: Recompute FOD hashes
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v6
+
+      - name: Install Nix
+        uses: DeterminateSystems/nix-installer-action@main
+
+      - name: Refresh hashes in flake.nix
+        run: |
+          set -euo pipefail
+          cmd/update-nix-hashes.sh
+
+      - name: Verify full package builds
+        run: nix build .#default --no-link --print-build-logs
+
+      - name: Open PR with refreshed hashes
+        uses: peter-evans/create-pull-request@v6
+        with:
+          title: "chore(nix): obnova FOD hashů ve flake.nix"
+          commit-message: "chore(nix): obnova FOD hashů ve flake.nix"
+          branch: auto/nix-hashes
+          delete-branch: true
+          body: |
+            Automatická obnova pnpm + composer fixed-output hashů ve `flake.nix`
+            po změně lockfile (`web/pnpm-lock.yaml` / `api/composer.lock`).
+
+            Vygenerováno workflow `update-nix-hashes.yml`. Stačí mrknout a mergnout.
