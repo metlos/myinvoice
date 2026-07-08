@@ -10,18 +10,46 @@
       # Verze je jediný zdroj pravdy — soubor VERSION v rootu (jako release-bundle.sh).
       version = nixpkgs.lib.fileContents ./VERSION;
 
+      phpExtensions = { enabled, all }:
+        enabled ++ (with all; [
+          pdo pdo_mysql mbstring openssl gd intl zip bcmath exif redis
+        ]);
+
+      # pkgs pro daný systém; crossSystem (kanonický GNU triple, ne krátký
+      # "aarch64-linux" tvar — jinak spadneš z Hydra cache, viz vps.nix
+      # .claude/cross-build-notes.md) přepne na skutečný cross build:
+      # buildPlatform = system, hostPlatform = crossSystem.
+      mkPkgs = system: crossSystem: import nixpkgs ({
+        inherit system;
+      } // (if crossSystem == null then { } else { crossSystem = { config = crossSystem; }; }));
+
       # Per-system helper: předá pkgs + PHP s potřebnými rozšířeními do každého výstupu.
       forAllSystems = f: nixpkgs.lib.genAttrs supportedSystems (system: f rec {
         inherit system;
         pkgs = nixpkgs.legacyPackages.${system};
-        php = pkgs.php85.withExtensions ({ enabled, all }:
-          enabled ++ (with all; [
-            pdo pdo_mysql mbstring openssl gd intl zip bcmath exif redis
-          ]));
+        php = pkgs.php85.withExtensions phpExtensions;
       });
-    in {
-      packages = forAllSystems ({ pkgs, php, ... }:
+
+      # Sestaví packages.{web,vendor,myinvoice} pro danou instanci pkgs (nativní i cross).
+      #
+      # buildPkgs (= pkgs.pkgsBuildHost) je tu záměrně použit pro VŠECHNO, co se při
+      # buildu skutečně SPOUŠTÍ jako program (php+composer pro `composer install`,
+      # node+pnpm pro `pnpm install`/`pnpm build`) — u cross buildu (buildPlatform=
+      # x86_64-linux, hostPlatform=aarch64-linux) by jinak `pkgs.php85`/`pkgs.nodejs_24`
+      # byly aarch64 binárky, které build stroj nemůže spustit bez QEMU (viz Gotcha 2
+      # v cross-build-notes.md — `pkgs.someHelper { ... }` volaný jako holá funkce se
+      # nespliceruje samo, na rozdíl od položek v nativeBuildInputs). U nativního buildu
+      # je pkgsBuildHost == pkgs, takže žádná změna chování.
+      #
+      # Výstup `vendor` (composer.lock obsahuje jen čisté PHP knihovny/skripty, žádné
+      # zkompilované rozšíření) i `web` (statické JS/CSS/HTML pro prohlížeč) jsou svým
+      # obsahem architekturně nezávislé — proto je naprosto v pořádku je sestavit čistě
+      # buildPkgs nástroji, aniž by bylo potřeba cokoliv cross-kompilovat pro aarch64.
+      mkOutputs = pkgs:
         let
+          buildPkgs = pkgs.pkgsBuildHost;
+          buildPhp = buildPkgs.php85.withExtensions phpExtensions;
+
           # 1) Frontend (Vue → web/dist) přes pnpm-lock.yaml (lockfileVersion 9 → pnpm 10).
           #    pnpm.fetchDeps je fixed-output derivation: hash závisí na pnpm-lock.yaml.
           #    NEUPRAVUJ ručně — obnovuje ho .github/workflows/update-nix-hashes.yml.
@@ -30,14 +58,14 @@
             inherit version;
             src = ./web;
 
-            pnpmDeps = pkgs.fetchPnpmDeps {
+            pnpmDeps = buildPkgs.fetchPnpmDeps {
               inherit (finalAttrs) pname version src;
-              pnpm = pkgs.pnpm_10;
+              pnpm = buildPkgs.pnpm_10;
               fetcherVersion = 3;
               hash = "sha256-MDqCnbtFv4XjkqUmTZDzVsVsrL+s0qM30kbE2hQssY0="; # @pnpm-deps-hash (auto-updated by CI)
             };
 
-            nativeBuildInputs = [ pkgs.nodejs_24 pkgs.pnpm_10 pkgs.pnpmConfigHook ];
+            nativeBuildInputs = [ buildPkgs.nodejs_24 buildPkgs.pnpm_10 buildPkgs.pnpmConfigHook ];
 
             buildPhase = ''
               runHook preBuild
@@ -56,7 +84,8 @@
           #    vendorHash je fixed-output derivation: závisí na composer.lock.
           #    NEUPRAVUJ ručně — obnovuje ho .github/workflows/update-nix-hashes.yml.
           #    Výstup je kompletní projekt v $out/share/php/<pname>; bereme z něj jen vendor/.
-          vendor = php.buildComposerProject (finalAttrs: {
+          #    buildPhp (viz výše) — composer install běží při buildu na build stroji.
+          vendor = buildPhp.buildComposerProject (finalAttrs: {
             pname = "myinvoice-api";
             inherit version;
             src = ./api;
@@ -92,7 +121,20 @@
         in {
           inherit web vendor myinvoice;
           default = myinvoice;
-        });
+        };
+
+      # aarch64-linux se nebuildí nativně (=> QEMU emulace celého PHP/Node buildu na
+      # x86_64 build stroji), ale skutečným cross buildem — viz mkOutputs výše.
+      aarch64CrossPkgs = mkPkgs "x86_64-linux" "aarch64-unknown-linux-gnu";
+
+      nativePackages = forAllSystems ({ pkgs, ... }: mkOutputs pkgs);
+    in {
+      # Pozor: `//` je jen mělký merge (viz Gotcha 4 v cross-build-notes.md) — proto
+      # slučujeme až o úroveň níž, aby zůstaly zachované x86_64-linux/x86_64-darwin/
+      # aarch64-darwin nativní výstupy z `nativePackages` a přepsal se jen aarch64-linux.
+      packages = nativePackages // {
+        aarch64-linux = mkOutputs aarch64CrossPkgs;
+      };
 
       devShells = forAllSystems ({ pkgs, php, ... }: {
         default = pkgs.mkShell {
