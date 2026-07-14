@@ -473,7 +473,7 @@
                   # Workers inherit secrets injected via EnvironmentFile on the systemd service.
                   "clear_env"           = "no";
                 };
-                phpEnv = {
+                phpEnv = lib.filterAttrs (n: v: v != "") ({
                   MYINVOICE_DATA_DIR       = cfg.dataDir;
                   MYINVOICE_APP_URL        = cfg.appUrl;
                   MYINVOICE_TIMEZONE       = cfg.timezone;
@@ -496,7 +496,7 @@
                   MYINVOICE_SMTP_FROM_NAME  = cfg.smtp.fromName;
                 } // lib.optionalAttrs (cfg.database.socket != null) {
                   MYINVOICE_DB_SOCKET = cfg.database.socket;
-                };
+                });
               };
 
               # Inject secrets into the phpfpm master process; workers inherit via clear_env=no.
