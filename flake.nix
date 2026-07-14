@@ -112,6 +112,9 @@
               rm -rf "$out/web/dist" "$out/api/vendor"
               cp -r ${web} "$out/web/dist"
               cp -r ${vendor}/share/php/myinvoice-api/vendor "$out/api/vendor"
+              # cfg.php je gitignored (jako cfg.local.php), takže v $out chybí — bez
+              # něj Config::load() hodí RuntimeException (viz Dockerfile stub).
+              echo '<?php return [];' > "$out/cfg.php"
               runHook postInstall
             '';
 
