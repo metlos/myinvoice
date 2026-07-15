@@ -19,6 +19,15 @@ final class Connection
         $this->logger = $logger ?? new NullLogger();
     }
 
+    public static function buildDsn(string $host, int $port, string $name, string $charset, ?string $socket): string
+    {
+        if ($socket !== null && $socket !== '') {
+            return "mysql:unix_socket={$socket};dbname={$name};charset={$charset}";
+        }
+
+        return "mysql:host={$host};port={$port};dbname={$name};charset={$charset}";
+    }
+
     public function pdo(): PDO
     {
         if ($this->pdo === null) {
@@ -28,8 +37,9 @@ final class Connection
             $user    = $this->config->get('db.user');
             $pass    = $this->config->get('db.pass', '');
             $charset = $this->config->get('db.charset', 'utf8mb4');
+            $socket  = $this->config->get('db.socket');
 
-            $dsn = "mysql:host={$host};port={$port};dbname={$name};charset={$charset}";
+            $dsn = self::buildDsn($host, $port, $name, $charset, $socket);
 
             $this->pdo = new LoggingPdo($dsn, $user, $pass, [
                 PDO::ATTR_ERRMODE            => PDO::ERRMODE_EXCEPTION,
