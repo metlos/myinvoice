@@ -87,7 +87,7 @@ $daysLabel = $daysOverride === null ? 'per-supplier' : (string) $daysOverride;
 echo "[" . date('Y-m-d H:i:s') . "] cron-send-reminders --days={$daysLabel} --cooldown={$cooldown}"
     . ($dryRun ? ' --dry-run' : '') . " — found " . count($candidates) . " candidates\n";
 
-$report = ['days' => $daysOverride, 'cooldown' => $cooldown, 'dry_run' => $dryRun, 'candidates' => count($candidates), 'sent' => 0, 'errors' => 0];
+$report = ['days' => $daysOverride, 'cooldown' => $cooldown, 'dry_run' => $dryRun, 'candidates' => count($candidates), 'sent' => 0, 'skipped_no_email' => 0, 'errors' => 0];
 
 if (empty($candidates)) {
     $ms = (int) ((microtime(true) - $startedAt) * 1000);
@@ -134,6 +134,15 @@ foreach ($candidates as $c) {
             implode(', ', $r['sent_to']),
             $r['days_overdue'],
         );
+    } catch (\DomainException $e) {
+        // Klient bez e-mailu (#221) není chyba — jen není komu upomínku poslat.
+        if ($e->getMessage() === ReminderService::NO_RECIPIENT_MESSAGE) {
+            $report['skipped_no_email']++;
+            printf("  – #%d %s — bez e-mailu, přeskočeno\n", $invId, (string) ($c['varsymbol'] ?? "draft#{$invId}"));
+        } else {
+            $report['errors']++;
+            fprintf(STDERR, "  ✗ #%d %s — %s\n", $invId, (string) ($c['varsymbol'] ?? "draft#{$invId}"), $e->getMessage());
+        }
     } catch (\Throwable $e) {
         $report['errors']++;
         fprintf(STDERR, "  ✗ #%d %s — %s\n", $invId, (string) ($c['varsymbol'] ?? "draft#{$invId}"), $e->getMessage());

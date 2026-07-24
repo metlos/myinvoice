@@ -19,6 +19,13 @@ declare(strict_types=1);
 
 require __DIR__ . '/../vendor/autoload.php';
 
+// STDOUT/STDERR existují jen v CLI SAPI. Tento skript lze spustit i z admin UI
+// („Plánované úlohy → spustit teď") a na sdíleném hostingu může spawn skončit
+// pod php-cgi/FastCGI, kde konstanty chybí — bez polyfillu by fwrite(STDERR) fataloval.
+if (!defined('STDERR')) {
+    define('STDERR', fopen('php://stderr', 'wb'));
+}
+
 use MyInvoice\Bootstrap;
 use MyInvoice\Infrastructure\Config\Config;
 use MyInvoice\Infrastructure\Database\Connection;

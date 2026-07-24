@@ -203,7 +203,7 @@ function openClient(c: Client, e?: MouseEvent) {
               <div v-if="c.archived_at" class="text-xs text-neutral-400 mt-0.5">{{ t('common.archived') }}</div>
             </td>
             <td class="px-4 py-3 font-mono text-xs text-neutral-600">{{ c.ic || '—' }}</td>
-            <td class="px-4 py-3 text-neutral-600">{{ c.main_email }}</td>
+            <td class="px-4 py-3 text-neutral-600">{{ c.main_email || '—' }}</td>
             <td class="px-4 py-3 text-center">
               <template v-if="roleFilter === 'vendors'">
                 <span v-if="c.purchase_count" class="inline-block px-2 py-0.5 text-xs bg-warning-50 text-warning-700 rounded">

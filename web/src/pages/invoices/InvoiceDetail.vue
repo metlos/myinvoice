@@ -3,7 +3,7 @@ import LinkedDocumentsPanel from '@/components/documents/LinkedDocumentsPanel.vu
 import { ref, computed, onMounted, watch } from 'vue'
 import { useRoute, useRouter, RouterLink } from 'vue-router'
 import { useI18n } from 'vue-i18n'
-import { invoicesApi, type Invoice, type WorkReport, type ApprovalStatus, type InvoiceAttachment, type AdvanceCandidate, type InvoicePayment } from '@/api/invoices'
+import { invoicesApi, type Invoice, type WorkReport, type ApprovalStatus, type InvoiceAttachment, type AdvanceCandidate, type InvoicePayment, type RelatedBankTransaction } from '@/api/invoices'
 import {
   settingsApi,
   type PdfSignatureDocumentEntityType,
@@ -21,7 +21,7 @@ import { useToast } from '@/composables/useToast'
 import WorkReportModal from '@/components/modals/WorkReportModal.vue'
 import ActionBar, { type ActionItem } from '@/components/ui/ActionBar.vue'
 
-const { t, locale } = useI18n()
+const { t, te, locale } = useI18n()
 const toast = useToast()
 
 const auth = useAuthStore()
@@ -76,6 +76,12 @@ const reminderOpen = ref(false)
 const approvalStatusOpen = ref(false)
 const approvalStatusDraft = ref<ApprovalStatus>('none')
 const approvalRejectReason = ref('')
+
+// Web faktura (trvalý veřejný odkaz) — modal
+const publicLinkOpen = ref(false)
+const publicLinkUrl = ref('')
+const publicLinkViewedAt = ref<string | null>(null)
+const publicLinkBusy = ref(false)
 
 const activity = ref<Array<{ id: number; user_email: string | null; user_name: string | null; action: string; payload: any; ip: string | null; created_at: string }>>([])
 const activityOpen = ref(false)
@@ -174,6 +180,10 @@ async function load() {
 
 // ───── Evidence plateb / částečné úhrady (#89) ─────────────────────────
 const payments = ref<InvoicePayment[]>([])
+const bankTransactions = ref<RelatedBankTransaction[]>([])
+// Rozlišuje „ještě nenačteno / načtení selhalo" od „opravdu nemá platby" — jinak by
+// informační hláška o chybějících detailech probliknutí i při chybě endpointu.
+const paymentsLoaded = ref(false)
 
 function paymentsRelevant(): boolean {
   const inv = invoice.value
@@ -183,11 +193,27 @@ function paymentsRelevant(): boolean {
 }
 
 function loadPayments() {
-  if (!invoice.value || !paymentsRelevant()) { payments.value = []; return }
+  paymentsLoaded.value = false
+  if (!invoice.value || !paymentsRelevant()) { payments.value = []; bankTransactions.value = []; return }
   invoicesApi.listPayments(invoice.value.id)
-    .then(r => { payments.value = r.payments })
-    .catch(() => { payments.value = [] })
+    .then(r => {
+      payments.value = r.payments
+      bankTransactions.value = r.bank_transactions ?? []
+      paymentsLoaded.value = true
+    })
+    .catch(() => { payments.value = []; bankTransactions.value = [] })
 }
+
+/** Popisek zdroje výpisu; neznámou hodnotu ENUMu radši ukáže syrově než jako holý i18n klíč. */
+function bankSourceLabel(source: RelatedBankTransaction['statement_source']): string {
+  const key = `invoice.payments.bank_sources.${source}`
+  return te(key) ? t(key) : source
+}
+
+const unrecordedBankTransactions = computed(() => {
+  const recorded = new Set(payments.value.map(p => p.bank_transaction_id).filter((id): id is number => id !== null))
+  return bankTransactions.value.filter(tx => !recorded.has(tx.id))
+})
 
 const remainingToPay = computed(() => {
   if (!invoice.value) return 0
@@ -483,6 +509,11 @@ function actionLabel(a: string): string {
     'invoice.approval_approved':      'invoice.actions.approval_approved',
     'invoice.approval_rejected':      'invoice.actions.approval_rejected',
     'invoice.approval_reset':         'invoice.actions.approval_reset',
+    'invoice.public_link_created':     'invoice.actions.public_link_created',
+    'invoice.public_link_regenerated': 'invoice.actions.public_link_regenerated',
+    'invoice.public_viewed':           'invoice.actions.public_viewed',
+    'invoice.public_pdf_downloaded':   'invoice.actions.public_pdf_downloaded',
+    'invoice.public_attachment_downloaded': 'invoice.actions.public_attachment_downloaded',
     'proforma.final_issued':          'invoice.actions.proforma_final_issued',
   }
   return map[a] ? (t(map[a]) as string) : a
@@ -617,6 +648,7 @@ useHotkey('escape', () => {
   else if (sendOpen.value)    sendOpen.value = false
   else if (reminderOpen.value) reminderOpen.value = false
   else if (approvalStatusOpen.value) approvalStatusOpen.value = false
+  else if (publicLinkOpen.value) publicLinkOpen.value = false
 })
 
 // Děkovný e-mail za úhradu (issue #57)
@@ -870,6 +902,52 @@ async function sendTestReminder() {
     toast.error( e?.response?.data?.error?.message || t('invoice.send_test_reminder_failed'))
   } finally {
     busy.value = null
+  }
+}
+
+// ─── Web faktura — trvalý veřejný odkaz (kopírovat / regenerovat / stav zobrazení) ───
+async function openPublicLink() {
+  if (!invoice.value) return
+  publicLinkOpen.value = true
+  publicLinkBusy.value = true
+  publicLinkUrl.value = ''
+  try {
+    const r = await invoicesApi.publicLink(invoice.value.id)
+    publicLinkUrl.value = r.url
+    publicLinkViewedAt.value = r.public_viewed_at
+  } catch (e: any) {
+    publicLinkOpen.value = false
+    toast.error(e?.response?.data?.error?.message || t('invoice.public_link.load_failed'))
+  } finally {
+    publicLinkBusy.value = false
+  }
+}
+
+async function copyPublicLink() {
+  if (!publicLinkUrl.value) return
+  try {
+    await navigator.clipboard.writeText(publicLinkUrl.value)
+    toast.success(t('invoice.public_link.copied'))
+  } catch {
+    toast.error(t('invoice.public_link.copy_failed'))
+  }
+}
+
+async function regeneratePublicLink() {
+  if (!invoice.value) return
+  if (!confirm(t('invoice.public_link.regenerate_confirm'))) return
+  publicLinkBusy.value = true
+  try {
+    const r = await invoicesApi.regeneratePublicLink(invoice.value.id)
+    publicLinkUrl.value = r.url
+    publicLinkViewedAt.value = null
+    invoice.value.public_viewed_at = null
+    toast.success(t('invoice.public_link.regenerated'))
+    invoicesApi.activity(invoice.value.id).then(a => { activity.value = a }).catch(() => {})
+  } catch (e: any) {
+    toast.error(e?.response?.data?.error?.message || t('invoice.public_link.regenerate_failed'))
+  } finally {
+    publicLinkBusy.value = false
   }
 }
 
@@ -1177,6 +1255,9 @@ const invoiceActions = computed<ActionItem[]>(() => {
       show: isDraft.value && inv.invoice_type !== 'tax_document' && w,
       title: t('invoice.wr_btn') as string, run: () => { wrModalOpen.value = true } },
     // ── overflow ──
+    { key: 'public-link', label: t('invoice.public_link.btn'), icon: 'link', tier: 'overflow', variant: 'primary',
+      show: !isDraft.value && w, disabled: b,
+      title: t('invoice.public_link.btn_title') as string, run: openPublicLink },
     { key: 'clone', label: t('invoice.clone'), icon: 'copy', tier: 'overflow', variant: 'primary',
       show: !isDraft.value && !['cancellation', 'credit_note'].includes(inv.invoice_type) && w,
       disabled: b, loading: busy.value === 'clone', run: cloneInvoice },
@@ -1245,6 +1326,11 @@ const invoiceActions = computed<ActionItem[]>(() => {
               ? t('invoice.approval.status_expired')
               : t('invoice.approval.status_' + approvalStatus) }}
         </span>
+        <span v-if="invoice.public_viewed_at"
+          class="text-xs px-2 py-0.5 rounded font-normal bg-success-50 text-success-600"
+          :title="t('invoice.public_link.viewed_at', { date: invoice.public_viewed_at.replace('T', ' ').slice(0, 16) })">
+          👁 {{ t('invoice.public_link.viewed_badge') }}
+        </span>
       </h1>
       <ActionBar :actions="invoiceActions" />
     </div>
@@ -1296,6 +1382,51 @@ const invoiceActions = computed<ActionItem[]>(() => {
             {{ busy === 'paid' ? '…' : t('common.confirm') }}
           </button>
         </div>
+      </div>
+    </div>
+
+    <!-- Modal web faktury (trvalý veřejný odkaz) -->
+    <div v-if="publicLinkOpen" class="fixed inset-0 bg-black/40 z-50 flex items-center justify-center p-4">
+      <div class="bg-surface rounded-xl shadow-lg max-w-lg w-full p-5">
+        <h3 class="text-lg font-semibold mb-1">{{ t('invoice.public_link.modal_title') }}</h3>
+        <p class="text-xs text-neutral-500 mb-4">{{ t('invoice.public_link.modal_hint') }}</p>
+
+        <div v-if="publicLinkBusy && !publicLinkUrl" class="text-sm text-neutral-500 py-4 text-center">…</div>
+        <template v-else-if="publicLinkUrl">
+          <div class="flex gap-2 mb-3">
+            <input :value="publicLinkUrl" readonly @focus="($event.target as HTMLInputElement).select()"
+              class="flex-1 h-10 px-3 border border-neutral-300 rounded-md text-sm font-mono bg-neutral-50 min-w-0" />
+            <button @click="copyPublicLink"
+              class="cursor-pointer px-3 h-10 text-sm bg-primary-600 hover:bg-primary-700 text-white font-medium rounded-md shrink-0">
+              {{ t('invoice.public_link.copy') }}
+            </button>
+          </div>
+
+          <p class="text-xs mb-4" :class="publicLinkViewedAt ? 'text-success-600' : 'text-neutral-500'">
+            {{ publicLinkViewedAt
+                ? t('invoice.public_link.viewed_at', { date: publicLinkViewedAt.replace('T', ' ').slice(0, 16) })
+                : t('invoice.public_link.not_viewed') }}
+          </p>
+          <p class="text-xs text-neutral-500 mb-4">{{ t('invoice.public_link.email_note') }}</p>
+
+          <div class="flex flex-wrap justify-between gap-2">
+            <button @click="regeneratePublicLink" :disabled="publicLinkBusy"
+              class="cursor-pointer px-3 h-9 text-sm border border-warning-500/50 rounded-md text-warning-600 hover:bg-warning-50 disabled:opacity-50"
+              :title="t('invoice.public_link.regenerate_title')">
+              {{ publicLinkBusy ? '…' : t('invoice.public_link.regenerate') }}
+            </button>
+            <div class="flex gap-2">
+              <a :href="publicLinkUrl" target="_blank" rel="noopener"
+                class="px-3 h-9 inline-flex items-center text-sm border border-neutral-300 rounded-md text-neutral-700 hover:bg-neutral-50">
+                {{ t('invoice.public_link.open') }}
+              </a>
+              <button @click="publicLinkOpen = false"
+                class="cursor-pointer px-3 h-9 text-sm border border-neutral-300 rounded-md text-neutral-700 hover:bg-neutral-50">
+                {{ t('common.close') }}
+              </button>
+            </div>
+          </div>
+        </template>
       </div>
     </div>
 
@@ -1812,6 +1943,94 @@ const invoiceActions = computed<ActionItem[]>(() => {
           </tfoot>
         </table>
       </div>
+    </div>
+
+    <!-- Přímé bankovní vazby bez invoice_payments — typicky historický import iDoklad. -->
+    <div v-if="paymentsRelevant() && unrecordedBankTransactions.length > 0"
+      class="bg-surface border border-neutral-200 rounded-lg shadow-sm overflow-hidden">
+      <div class="px-5 py-3 border-b border-neutral-200">
+        <h3 class="text-sm font-semibold uppercase tracking-wide text-neutral-500">{{ t('invoice.payments.bank_transactions_title') }}</h3>
+        <p class="text-xs text-neutral-500 mt-1">{{ t('invoice.payments.bank_transactions_hint') }}</p>
+      </div>
+      <div class="hidden md:block overflow-x-auto">
+        <table class="w-full text-sm">
+          <thead class="bg-neutral-50 text-xs text-neutral-500 uppercase tracking-wide">
+            <tr>
+              <th class="px-4 py-2 text-left font-medium">{{ t('invoice.payments.paid_on') }}</th>
+              <th class="px-4 py-2 text-right font-medium">{{ t('invoice.payments.amount') }}</th>
+              <th class="px-4 py-2 text-left font-medium">{{ t('invoice.payments.source') }}</th>
+              <th class="px-4 py-2 text-left font-medium">{{ t('invoice.payments.counterparty') }}</th>
+              <th class="px-4 py-2 text-left font-medium">{{ t('invoice.payments.reference') }}</th>
+              <th class="px-4 py-2"></th>
+            </tr>
+          </thead>
+          <tbody class="divide-y divide-neutral-100">
+            <tr v-for="tx in unrecordedBankTransactions" :key="tx.id">
+              <td class="px-4 py-2.5">{{ formatDate(tx.posted_at) }}</td>
+              <td class="px-4 py-2.5 text-right font-mono font-medium">{{ formatMoney(tx.amount, tx.currency ?? invoice.currency) }}</td>
+              <td class="px-4 py-2.5">
+                <span class="text-xs px-1.5 py-0.5 rounded bg-neutral-100 text-neutral-600">
+                  {{ bankSourceLabel(tx.statement_source) }}
+                </span>
+              </td>
+              <td class="px-4 py-2.5 text-xs">
+                <div v-if="tx.counterparty_account" class="font-mono text-neutral-700">
+                  {{ tx.counterparty_account }}<span v-if="tx.counterparty_bank">/{{ tx.counterparty_bank }}</span>
+                </div>
+                <div v-if="tx.counterparty_name" class="text-neutral-500">{{ tx.counterparty_name }}</div>
+              </td>
+              <td class="px-4 py-2.5 text-xs text-neutral-500">
+                <div>
+                  <span v-if="tx.variable_symbol" class="font-mono">VS {{ tx.variable_symbol }}</span>
+                  <span v-if="tx.constant_symbol" class="font-mono ml-1">/ KS {{ tx.constant_symbol }}</span>
+                  <span v-if="tx.specific_symbol" class="font-mono ml-1">/ SS {{ tx.specific_symbol }}</span>
+                </div>
+                <div v-if="tx.description">{{ tx.description }}</div>
+                <div v-if="tx.bank_ref" class="text-neutral-400">{{ tx.bank_ref }}</div>
+              </td>
+              <td class="px-4 py-2.5 text-right">
+                <RouterLink :to="`/bank/${tx.statement_id}`" class="text-xs text-primary-700 hover:underline">
+                  {{ t('invoice.payments.statement_link') }}
+                </RouterLink>
+              </td>
+            </tr>
+          </tbody>
+        </table>
+      </div>
+      <div class="md:hidden divide-y divide-neutral-100">
+        <div v-for="tx in unrecordedBankTransactions" :key="`bank-${tx.id}`" class="p-4 space-y-2 text-sm">
+          <div class="flex items-baseline justify-between gap-3">
+            <span class="text-neutral-500">{{ formatDate(tx.posted_at) }}</span>
+            <span class="font-mono font-medium">{{ formatMoney(tx.amount, tx.currency ?? invoice.currency) }}</span>
+          </div>
+          <div class="flex items-center justify-between gap-3">
+            <span class="text-xs px-1.5 py-0.5 rounded bg-neutral-100 text-neutral-600">
+              {{ bankSourceLabel(tx.statement_source) }}
+            </span>
+            <RouterLink :to="`/bank/${tx.statement_id}`" class="text-xs text-primary-700 hover:underline">
+              {{ t('invoice.payments.statement_link') }}
+            </RouterLink>
+          </div>
+          <div class="text-xs">
+            <div v-if="tx.counterparty_account" class="font-mono text-neutral-700">
+              {{ tx.counterparty_account }}<span v-if="tx.counterparty_bank">/{{ tx.counterparty_bank }}</span>
+            </div>
+            <div v-if="tx.counterparty_name" class="text-neutral-500">{{ tx.counterparty_name }}</div>
+          </div>
+          <div class="text-xs text-neutral-500">
+            <span v-if="tx.variable_symbol" class="font-mono">VS {{ tx.variable_symbol }}</span>
+            <span v-if="tx.constant_symbol" class="font-mono ml-1">/ KS {{ tx.constant_symbol }}</span>
+            <span v-if="tx.specific_symbol" class="font-mono ml-1">/ SS {{ tx.specific_symbol }}</span>
+            <div v-if="tx.description">{{ tx.description }}</div>
+            <div v-if="tx.bank_ref" class="text-neutral-400">{{ tx.bank_ref }}</div>
+          </div>
+        </div>
+      </div>
+    </div>
+
+    <div v-else-if="paymentsLoaded && paymentsRelevant() && invoice.status === 'paid' && payments.length === 0"
+      class="bg-neutral-50 border border-neutral-200 rounded-lg px-5 py-4 text-sm text-neutral-600">
+      {{ t('invoice.payments.imported_without_details', { date: invoice.paid_at ? formatDate(invoice.paid_at) : '—' }) }}
     </div>
 
     <!-- CZK přepočet pro faktury v cizí měně -->

@@ -9,6 +9,7 @@ import {
   type PurchaseInvoiceListItem,
   type PurchaseInvoiceStatus,
   type PurchaseDocumentKind,
+  type ImportBatch,
 } from '@/api/purchaseInvoices'
 import { formatMoney, formatDate, formatMonth, taxDateClass } from '@/composables/useFormat'
 import { useHotkey } from '@/composables/useHotkey'
@@ -53,6 +54,9 @@ const paymentOrderedFilter = ref<'' | '1' | '0'>('')
 const currencyFilter = ref('')
 const vendorFilter = ref<number | ''>('')
 const vendors = ref<Client[]>([])
+// Filtr na dávku hromadného AI importu (#232) — proklik z obrazovky importu.
+const importBatchFilter = ref('')
+const importBatches = ref<ImportBatch[]>([])
 
 // Počet aktivních filtrů pro odznáček na mobilním tlačítku „Filtry" (rok i hledání se nepočítají)
 const activeFilterCount = computed(() => {
@@ -66,6 +70,7 @@ const activeFilterCount = computed(() => {
   if (unpaidOnly.value) n++
   if (needsReviewOnly.value) n++
   if (paymentOrderedFilter.value) n++
+  if (importBatchFilter.value) n++
   return n
 })
 
@@ -87,6 +92,8 @@ onMounted(() => {
   // Dodavatelé pro filtr (jen dodavatelé — přijaté faktury chodí od nich).
   clientsApi.list({ archived: false, per_page: 200, role: 'vendors' })
     .then(r => { vendors.value = r.data }).catch(() => {})
+  // Dávky hromadného AI importu pro „dohledat import" dropdown (#232).
+  purchaseInvoicesApi.listImportBatches().then(b => { importBatches.value = b }).catch(() => {})
 })
 
 function loadFiltersFromQuery(q: typeof route.query) {
@@ -104,6 +111,10 @@ function loadFiltersFromQuery(q: typeof route.query) {
   dateTo.value       = typeof q.to === 'string' ? q.to : ''
   currencyFilter.value = typeof q.currency === 'string' ? q.currency : ''
   vendorFilter.value = typeof q.vendor === 'string' && q.vendor !== '' ? Number(q.vendor) : ''
+  importBatchFilter.value = typeof q.import_batch === 'string' ? q.import_batch : ''
+  // Proklik z importu obvykle přijde bez roku — přepnout na „všechny roky", ať se
+  // dávka neschová kvůli defaultu na aktuální rok.
+  if (importBatchFilter.value && typeof q.year !== 'string') yearFilter.value = ''
   search.value       = typeof q.q === 'string' ? q.q : ''
 }
 
@@ -125,12 +136,14 @@ function syncFiltersToUrl() {
   if (unpaidOnly.value) q.unpaid = '1'
   if (needsReviewOnly.value) q.needs_review = '1'
   if (paymentOrderedFilter.value) q.payment_ordered = paymentOrderedFilter.value
+  if (importBatchFilter.value) q.import_batch = importBatchFilter.value
   if (search.value) q.q = search.value
   router.replace({ query: q })
 }
 
 watch([statusFilter, kindFilter, yearFilter, monthFilter, dateFrom, dateTo,
-       overdueOnly, unpaidOnly, needsReviewOnly, paymentOrderedFilter, currencyFilter, vendorFilter], () => {
+       overdueOnly, unpaidOnly, needsReviewOnly, paymentOrderedFilter, currencyFilter, vendorFilter,
+       importBatchFilter], () => {
   syncFiltersToUrl()
   load()
 })
@@ -157,6 +170,7 @@ watch(() => route.query, (newQ) => {
     paymentOrderedFilter.value = ''
     currencyFilter.value = ''
     vendorFilter.value = ''
+    importBatchFilter.value = ''
     search.value = ''
     // Uvolnit po flush (watch effects)
     setTimeout(() => { suppressUrlSync = false }, 0)
@@ -213,6 +227,7 @@ async function load(reset = true) {
       overdue:       overdueOnly.value  || undefined,
       needs_review:  needsReviewOnly.value || undefined,
       payment_ordered: paymentOrderedFilter.value || undefined,
+      import_batch_id: importBatchFilter.value || undefined,
       q:             search.value       || undefined,
       page: page.value,
     })
@@ -351,6 +366,36 @@ async function bulkDelete() {
   else            toast.error(t('purchase_invoice.bulk.partial', { ok, fail }))
   await load()
 }
+
+// Hromadná změna typu dokladu (#232) — po AI importu přehodit vybrané „Doklady
+// o úhradě" na „Faktura" apod. Vyloučené: stornované a zálohy (settlement vazby).
+function invOf(id: number): PurchaseInvoiceListItem | null {
+  for (const g of groups.value) {
+    const f = g.invoices.find(i => i.id === id)
+    if (f) return f
+  }
+  return null
+}
+const kindEditableSelected = computed(() => selectedIds.value.filter(id => {
+  const inv = invOf(id)
+  return inv && inv.status !== 'cancelled' && inv.document_kind !== 'advance'
+}))
+const bulkKindTarget = ref<PurchaseDocumentKind | ''>('')
+async function bulkSetKind() {
+  const kind = bulkKindTarget.value
+  const ids = kindEditableSelected.value
+  if (!kind || ids.length === 0 || bulkBusy.value) { bulkKindTarget.value = ''; return }
+  bulkBusy.value = true
+  let ok = 0, fail = 0
+  for (const id of ids) {
+    try { await purchaseInvoicesApi.setDocumentKind(id, kind); ok++ } catch { fail++ }
+  }
+  bulkBusy.value = false
+  bulkKindTarget.value = ''
+  if (fail === 0) toast.success(t('purchase_invoice.bulk.kind_success', { n: ok }))
+  else            toast.error(t('purchase_invoice.bulk.partial', { ok, fail }))
+  await load()
+}
 </script>
 
 <template>
@@ -398,6 +443,17 @@ async function bulkDelete() {
           <svg class="w-4 h-4" fill="none" viewBox="0 0 24 24" stroke="currentColor" stroke-width="2"><path stroke-linecap="round" stroke-linejoin="round" d="M6 18L18 6M6 6l12 12"/></svg>
           {{ bulkBusy ? '…' : t('purchase_invoice.bulk.cancel', { n: cancellableSelected.length }) }}
         </button>
+        <!-- Hromadná změna typu dokladu (#232) — oprava AI klasifikace po importu -->
+        <select v-if="(kindEditableSelected.length > 0) && auth.canWrite"
+          v-model="bulkKindTarget"
+          @change="bulkSetKind"
+          :disabled="bulkBusy"
+          class="cursor-pointer h-9 px-2 border border-primary-500 text-primary-700 bg-surface hover:bg-primary-50 disabled:opacity-50 text-sm font-medium rounded-md">
+          <option value="">{{ t('purchase_invoice.bulk.set_kind', { n: kindEditableSelected.length }) }}</option>
+          <option value="invoice">{{ t('purchase_invoice.document_kind.invoice') }}</option>
+          <option value="receipt">{{ t('purchase_invoice.document_kind.receipt') }}</option>
+          <option value="credit_note">{{ t('purchase_invoice.document_kind.credit_note') }}</option>
+        </select>
         <button v-if="(draftsSelected.length > 0) && auth.canWrite"
           @click="bulkDelete"
           :disabled="bulkBusy"
@@ -482,6 +538,17 @@ async function bulkDelete() {
           <option value="">{{ t('purchase_invoice.filters.payment_ordered_all') }}</option>
           <option value="1">{{ t('purchase_invoice.filters.payment_ordered_yes') }}</option>
           <option value="0">{{ t('purchase_invoice.filters.payment_ordered_no') }}</option>
+        </select>
+        <!-- Dohledat dávku hromadného AI importu (#232) -->
+        <select v-if="importBatches.length || importBatchFilter" v-model="importBatchFilter"
+          class="h-9 px-3 border border-neutral-300 rounded-md bg-surface text-sm max-w-[16rem]"
+          :title="t('purchase_invoice.filters.import_batch')">
+          <option value="">{{ t('purchase_invoice.filters.import_batch_all') }}</option>
+          <option v-if="importBatchFilter && !importBatches.some(b => b.import_batch_id === importBatchFilter)"
+            :value="importBatchFilter">{{ t('purchase_invoice.filters.import_batch_current') }}</option>
+          <option v-for="b in importBatches" :key="b.import_batch_id" :value="b.import_batch_id">
+            {{ formatDate(b.created_at) }} · {{ t('purchase_invoice.filters.import_batch_count', { n: b.count }) }}
+          </option>
         </select>
     </FilterBar>
 

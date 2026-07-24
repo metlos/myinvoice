@@ -131,12 +131,21 @@ function runAutoBackfills(\PDO $db, string $binDir): void
     $checks = [
         [
             'name'    => 'exchange-rates',
-            'reason'  => 'non-CZK přijaté faktury bez exchange_rate',
-            'count'   => "SELECT COUNT(*) FROM purchase_invoices pi
-                            JOIN currencies cur ON cur.id = pi.currency_id
-                           WHERE pi.exchange_rate IS NULL
-                             AND cur.code != 'CZK'
-                             AND pi.status != 'cancelled'",
+            // #238: počítej OBĚ strany — přijaté i VYSTAVENÉ faktury. Skript
+            // backfill-exchange-rates.php řeší obojí, ale pokud žádná přijatá kurz
+            // nepostrádala, dřív se vůbec nespustil, i když vystavené kurz neměly.
+            'reason'  => 'non-CZK faktury (přijaté i vystavené) bez exchange_rate',
+            'count'   => "SELECT
+                            (SELECT COUNT(*) FROM purchase_invoices pi
+                                JOIN currencies cur ON cur.id = pi.currency_id
+                               WHERE pi.exchange_rate IS NULL
+                                 AND cur.code != 'CZK'
+                                 AND pi.status != 'cancelled')
+                          + (SELECT COUNT(*) FROM invoices i
+                                JOIN currencies cur ON cur.id = i.currency_id
+                               WHERE i.exchange_rate IS NULL
+                                 AND cur.code != 'CZK'
+                                 AND i.status NOT IN ('cancelled', 'draft'))",
             'script'  => 'backfill-exchange-rates.php',
         ],
         [

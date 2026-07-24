@@ -23,7 +23,7 @@ use MyInvoice\Infrastructure\Database\Connection;
  *     - **1** = Přemístění obchodního majetku do JČS (§ 13 odst. 6)
  *     - **2** = Dodání zboží formou třístranného obchodu prostřední osobou (§ 17, ř.31, VAT kód "31")
  *     - **3** = Poskytnutí služby s místem plnění v JČS (§ 9 odst. 1, ř.21, VAT kód "22")
- *   - DIČ kupujícího (s prefixem země, např. SK1234567890)
+ *   - DIČ kupujícího BEZ prefixu země (kód země je zvlášť v k_stat), např. 1234567890
  *   - Hodnota plnění v CZK (základ daně, bez DPH)
  *   - Počet plnění
  *
@@ -77,7 +77,16 @@ final class SouhrnneHlaseniBuilder
         }
         $end = (new \DateTimeImmutable(sprintf('%04d-%02d-01', $year, $endMonth)))->modify('last day of this month')->format('Y-m-d');
 
-        $rows = $this->collectEuSupplies($supplierId, $start, $end);
+        $missingRates = [];
+        $rows = $this->collectEuSupplies($supplierId, $start, $end, $missingRates);
+
+        // #238: EU dodávky v cizí měně bez zafixovaného kurzu. NEházíme chybu — vrátíme
+        // je v `missing_rates`; akce při stažení je doplní z ČNB, náhled jen varuje.
+        if ($missingRates !== []) {
+            $warnings[] = 'Chybí kurz u EU dodávek v cizí měně: '
+                . implode(', ', VatLedgerService::missingExchangeRateLabels($missingRates))
+                . '. Při stažení XML se doplní z ČNB.';
+        }
 
         $periodLabel = $period === 'quarterly' && $quarter !== null
             ? "tomto čtvrtletí"
@@ -122,36 +131,19 @@ final class SouhrnneHlaseniBuilder
         } else {
             $vetaD->setAttribute('mesic', (string) $month);
         }
-        $vetaD->setAttribute('shvies_forma', 'B'); // B = řádné
+        // shvies_forma: EPO povoluje pouze [RN] — R = řádné, N = následné (opravné).
+        // (Pozn.: dřívější 'B' bylo omylem převzato z KH — DPHSHV žádné 'B' nezná
+        //  a EPO ho odmítá „...neodpovídá regulárnímu výrazu [RN]". Issue #238.)
+        $vetaD->setAttribute('shvies_forma', 'R');
         $vetaD->setAttribute('dokument', 'SHV');
         $shv->appendChild($vetaD);
 
-        // VetaP — identifikace poplatníka
+        // VetaP — identifikace poplatníka. Sdílený helper (stejný jako DPHDP3/DPHKH1):
+        // odstranění akademických titulů + rozdělení jména na jmeno/prijmeni (#200) a
+        // adresy na ulice/c_pop/c_orient. `includeContact: false`, protože DPHSHV XSD
+        // atributy email/c_telef nezná (na rozdíl od DPH/KH) — EPO by je odmítlo.
         $vetaP = $dom->createElement('VetaP');
-        $vetaP->setAttribute('c_ufo', (string) ($supplier['financial_office_code'] ?: '451'));
-        if (!empty($supplier['workplace_code'])) {
-            $vetaP->setAttribute('c_pracufo', (string) $supplier['workplace_code']);
-        }
-        $dic = (string) ($supplier['dic'] ?? '');
-        $cleanDic = preg_replace('/^CZ/i', '', $dic) ?? $dic;
-        $cleanDic = preg_replace('/[^0-9]/', '', $cleanDic) ?? '';
-        $vetaP->setAttribute('dic', $cleanDic);
-        $vetaP->setAttribute('typ_ds', $supplier['data_box_type'] ?: 'F');
-        if ($supplier['taxpayer_type'] === 'po') {
-            $vetaP->setAttribute('zkrobchjm', (string) $supplier['company_name']);
-        } else {
-            $parts = explode(' ', trim((string) $supplier['company_name']), 2);
-            $vetaP->setAttribute('jmeno', $parts[0] ?? '');
-            $vetaP->setAttribute('prijmeni', $parts[1] ?? $parts[0] ?? '');
-        }
-        $vetaP->setAttribute('ulice', (string) ($supplier['street'] ?? ''));
-        $vetaP->setAttribute('naz_obce', (string) ($supplier['city'] ?? ''));
-        $vetaP->setAttribute('psc', preg_replace('/\s/', '', (string) ($supplier['zip'] ?? '')) ?? '');
-        // `stat` = NÁZEV státu z číselníku Země (naz_zeme_c25), NE ISO2 kód (#201).
-        $statName = EpoSupplierBlockBuilder::countryName((string) ($supplier['country_iso2'] ?? 'CZ'));
-        if ($statName !== null) {
-            $vetaP->setAttribute('stat', $statName);
-        }
+        EpoSupplierBlockBuilder::fillVetaP($vetaP, $supplier, includeContact: false);
         $shv->appendChild($vetaP);
 
         // VetaR — jednotlivé řádky souhrnného hlášení (per VAT_ID + typ plnění).
@@ -166,9 +158,12 @@ final class SouhrnneHlaseniBuilder
             $rowNum++;
             $v = $dom->createElement('VetaR');
             $v->setAttribute('c_rad', (string) $rowNum);
-            $v->setAttribute('k_storno', 'N'); // N = řádné, není to oprava
+            // k_storno se v ŘÁDNÉM hlášení NEvyplňuje — EPO ho odmítá („Pro řádné
+            // souhrnné hlášení nesmí být vyplněn kód storna"). Slouží jen pro storno
+            // řádky v NÁSLEDNÉM hlášení (to zatím negenerujeme). Issue #238.
             // k_stat = kód státu pro DPH/VIES (Řecko má ISO "GR", ale DPH kód "EL").
             $v->setAttribute('k_stat', KontrolniHlaseniBuilder::khCountryCode($r['country_iso2']));
+            // c_vat = DIČ BEZ prefixu země (kód země nese k_stat). Issue #238.
             $v->setAttribute('c_vat', $r['vat_id']);
             $v->setAttribute('k_pln_eu', $r['sh_type']);
             $v->setAttribute('pln_hodnota', $this->formatAmount($r['amount']));
@@ -196,6 +191,7 @@ final class SouhrnneHlaseniBuilder
                 'submission_deadline' => $deadline,
             ],
             'warnings' => $warnings,
+            'missing_rates' => $missingRates,
         ];
     }
 
@@ -206,20 +202,46 @@ final class SouhrnneHlaseniBuilder
      * @return list<array{country_iso2:string, vat_id:string, sh_type:string,
      *                   amount:float, count:int, counterparty_name:string}>
      */
-    private function collectEuSupplies(int $supplierId, string $start, string $end): array
+    private function collectEuSupplies(int $supplierId, string $start, string $end, array &$missingRates = []): array
     {
         // Projekce kanonických řádků (VatLedgerService) — vystavená EU B2B plnění:
         // kód 20/21/22, EU země (≠ CZ) s DIČ. base_czk je už PŘEPOČTENÝ na CZK kurzem
         // faktury (oprava staré chyby — SH dříve sčítalo total_without_vat v cizí měně).
         $result = [];
+        $missingSeen = [];
         foreach ($this->ledger->rows($supplierId, $start, $end, includeDrafts: false) as $r) {
             if ($r['source'] !== 'sale') continue;
             $code = $r['code'];
             if ($code === null || !isset(self::VAT_CODE_TO_SH_TYPE[$code])) continue;
             if (!$r['country_is_eu'] || $r['country_iso2'] === 'CZ' || $r['country_iso2'] === null) continue;
 
-            $vatId = $this->normalizeVatId((string) ($r['counterparty_dic'] ?? ''), (string) $r['country_iso2']);
+            // c_vat = DIČ BEZ prefixu země (strhne jen prefix odpovídající zemi, ne
+            // libovolná 2 písmena — FR má alfanumerickou vnitrostátní část; GR→EL).
+            // Používáme sdílenou (a proti VIES ověřenou) normalizaci z KH. Issue #238.
+            $vatId = KontrolniHlaseniBuilder::cleanEuVatId(
+                (string) ($r['counterparty_dic'] ?? ''),
+                (string) $r['country_iso2'],
+            );
             if ($vatId === '') continue; // bez DIČ nelze podat SH
+
+            // Daňová pojistka: EU dodávka v cizí měně bez zafixovaného kurzu by se
+            // vykázala s náhradním kurzem 1.0 (EUR jako CZK). Sesbíráme ji do
+            // $missingRates — akce ji při stažení doplní z ČNB (issue #238).
+            if (!empty($r['exchange_rate_missing'])) {
+                $key = 'sale:' . (int) $r['invoice_id'];
+                if (!isset($missingSeen[$key])) {
+                    $missingSeen[$key] = true;
+                    $doc = (string) ($r['doc_number'] ?? '') ?: ('#' . (string) $r['invoice_id']);
+                    $missingRates[] = [
+                        'invoice_id' => (int) $r['invoice_id'],
+                        'source'     => 'sale',
+                        'currency'   => (string) $r['currency'],
+                        'tax_date'   => isset($r['tax_date']) ? (string) $r['tax_date'] : null,
+                        'issue_date' => isset($r['issue_date']) ? (string) $r['issue_date'] : null,
+                        'doc'        => $doc,
+                    ];
+                }
+            }
 
             $shType = self::VAT_CODE_TO_SH_TYPE[$code];
             $key = "{$r['country_iso2']}|{$vatId}|{$shType}";
@@ -247,23 +269,6 @@ final class SouhrnneHlaseniBuilder
     }
 
     /**
-     * Normalize VAT ID — odstraní mezery + uppercase. Pokud nemá country prefix,
-     * přidá z `country_iso2`.
-     */
-    private function normalizeVatId(string $dic, string $countryIso2): string
-    {
-        $dic = preg_replace('/\s+/', '', strtoupper(trim($dic))) ?? '';
-        if ($dic === '') return '';
-        // Kód státu pro DPH/VIES (Řecko: ISO "GR" → DPH "EL").
-        $code = KontrolniHlaseniBuilder::khCountryCode($countryIso2);
-        // Pokud už začíná kódem země (2 písmena), ponech — jen GR převeď na EL.
-        if (preg_match('/^[A-Z]{2}/', $dic)) {
-            return str_starts_with($dic, 'GR') ? 'EL' . substr($dic, 2) : $dic;
-        }
-        return $code . $dic;
-    }
-
-    /**
      * Note: Souhrnné hlášení **nevyžaduje** být plátcem DPH.
      * Podávají ho i **identifikované osoby** (neplátci, kteří poskytují služby EU plátcům
      * nebo nakupují zboží z EU nad limit). DIČ je u identifikované osoby ve formátu
@@ -284,9 +289,13 @@ final class SouhrnneHlaseniBuilder
         $stmt = $this->db->pdo()->prepare(
             "SELECT s.id, s.company_name, s.street, s.city, s.zip,
                     COALESCE(c.iso2, 'CZ') AS country_iso2,
-                    s.ic, s.dic, s.is_vat_payer,
+                    s.ic, s.dic, s.is_vat_payer, s.is_identified,
                     s.taxpayer_type, s.financial_office_code,
-                    s.workplace_code, s.data_box_type, s.data_box_id
+                    s.workplace_code, s.data_box_id,
+                    s.email, s.phone, s.cz_nace_code,
+                    s.street_number_pop, s.street_number_orient,
+                    s.opr_jmeno, s.opr_prijmeni, s.opr_postaveni,
+                    s.sest_jmeno, s.sest_prijmeni, s.sest_telefon, s.sest_email, s.sest_funkce
                FROM supplier s
           LEFT JOIN countries c ON c.id = s.country_id
               WHERE s.id = ?"

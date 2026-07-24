@@ -17,12 +17,18 @@ use MyInvoice\Infrastructure\Config\RuntimePaths;
  * SQL, jiný service).
  *
  * Povolené tvary (SupplierLogoConverter::process pište jen tyhle):
- *   storage/supplier-logos/sup-{N}.png       — pro PNG po konverzi
- *   storage/supplier-logos/sup-{N}.svg       — případné SVG (zatím nepoužíváno)
+ *   storage/supplier-logos/sup-{N}.png                       — logo dodavatele
+ *   storage/supplier-logos/sup-{N}.svg                       — SVG sidecar (PDF)
+ *   storage/supplier-logos/sup-{N}-brand-{P}-{hash12}.png    — logo brandingového profilu
+ *   storage/supplier-logos/sup-{N}-brand-{P}-{hash12}.svg
+ *
+ * `{P}` je id brandingového profilu, `{hash12}` prvních 12 hex znaků SHA-256
+ * obsahu — díky němu re-upload nepřepíše soubor, který drží starší snapshot.
+ * Tenant se pořád pozná z `sup-{N}`, takže cizí logo nepropustíme.
  *
  * Vrací **absolutní cestu** pokud:
  *   - prefix odpovídá očekávanému dir
- *   - basename match `sup-{supplierId}.{ext}` (žádný traversal)
+ *   - basename match `sup-{supplierId}[-brand-{P}-{hash12}].{ext}` (žádný traversal)
  *   - extension je v allowlistu
  *   - realpath() neutekl mimo RuntimePaths::storage('supplier-logos')
  *   - soubor reálně existuje
@@ -44,8 +50,8 @@ final class SafeLogoPath
 
         // Musí začínat očekávaným prefixem (relativně k rootDir, bez leading /)
         $rel = ltrim($logoPath, '/');
-        $expectedPrefix = self::SAFE_DIR . '/sup-' . $supplierId;
-        if (!str_starts_with($rel, $expectedPrefix . '.')) return null;
+        $expectedPrefix = self::SAFE_DIR . '/';
+        if (!str_starts_with($rel, $expectedPrefix)) return null;
 
         // Extension allowlist
         $ext = strtolower((string) pathinfo($rel, PATHINFO_EXTENSION));
@@ -53,7 +59,10 @@ final class SafeLogoPath
 
         // Basename validace — žádné víc-úrovňové cesty
         $basename = basename($rel);
-        if ($basename !== 'sup-' . $supplierId . '.' . $ext) return null;
+        $quotedExt = preg_quote($ext, '/');
+        if (!preg_match('/^sup-' . $supplierId . '(?:-brand-[1-9][0-9]*-[a-f0-9]{12})?\.' . $quotedExt . '$/', $basename)) {
+            return null;
+        }
 
         $rootDir = \MyInvoice\Infrastructure\Config\RuntimePaths::base();
         $abs = $rootDir . '/' . $rel;

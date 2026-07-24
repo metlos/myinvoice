@@ -20,7 +20,7 @@ Vyvíjí **[MyWebdesign.cz s.r.o.](https://mywebdesign.cz/)**
 
 > ⚠️ **Než začneš fakturovat — přečti si [Fakturujeme — daňový průvodce](manual/28_Fakturujeme.md).**
 > Vysvětluje, jak aplikace pracuje s plátci/neplátci DPH, sazbami, reverse charge,
-> kde má aplikace limitace (OSS, SK 23 %) a jak je obejít. **Správnost faktury
+> kde má aplikace limitace (např. automatické posouzení OSS nebo IOSS) a jak je řešit. **Správnost faktury
 > je vždy na uživateli — pro nestandardní situace konzultuj účetní.**
 
 ![Přehled (dashboard)](manual/img/01_dashboard.webp)
@@ -135,6 +135,7 @@ alternativa s důrazem na:
 - **DPHDP3** — přiznání k DPH (měsíční / kvartální, s ohledem na is_vat_payer + financial_office_code)
 - **DPHKH1** — Kontrolní hlášení (A.1-A.5, B.1-B.3, řádky 40-43, RC, dovoz)
 - **DPHSHV** — Souhrnné hlášení (EU intracom dodávky)
+- **OSSEI1** — kvartální OSS přehled z ručně označených řádků, opravy minulých období a EPO XML
 - **DPFDP5** (OSVČ) a **DPPDP9** (právnické osoby) — daň z příjmů MVP foundation
 - XML pro **EPO portál MFČR** + XSD validace přes `DOMDocument::schemaValidate`
 - **Archiv podání** — každé generování XML s timestamp + summary + status

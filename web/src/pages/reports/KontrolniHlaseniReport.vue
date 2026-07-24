@@ -31,6 +31,26 @@ const preview = ref<Awaited<ReturnType<typeof reportsApi.khPreview>> | null>(nul
 const loading = ref(false)
 const error = ref('')
 
+type KhSectionRow = {
+  code: string
+  labelKey: string
+  count: number
+  aggregated: boolean
+}
+
+const sectionARows = computed<KhSectionRow[]>(() => preview.value ? [
+  { code: 'A.1', labelKey: 'reports.kh.a1_label', count: preview.value.summary.a1_count, aggregated: false },
+  { code: 'A.2', labelKey: 'reports.kh.a2_label', count: preview.value.summary.a2_count, aggregated: false },
+  { code: 'A.4', labelKey: 'reports.kh.a4_label', count: preview.value.summary.a4_count, aggregated: false },
+  { code: 'A.5', labelKey: 'reports.kh.a5_label', count: preview.value.summary.a5_count_aggregated, aggregated: true },
+] : [])
+
+const sectionBRows = computed<KhSectionRow[]>(() => preview.value ? [
+  { code: 'B.1', labelKey: 'reports.kh.b1_label', count: preview.value.summary.b1_count, aggregated: false },
+  { code: 'B.2', labelKey: 'reports.kh.b2_label', count: preview.value.summary.b2_count, aggregated: false },
+  { code: 'B.3', labelKey: 'reports.kh.b3_label', count: preview.value.summary.b3_count_aggregated, aggregated: true },
+] : [])
+
 async function loadPreview() {
   loading.value = true
   error.value = ''
@@ -153,30 +173,20 @@ onMounted(async () => {
         </div>
       </div>
 
-      <!-- Sekce A — vystavené -->
+      <!-- Sekce A — plnění s povinností přiznat daň -->
       <div class="bg-surface border border-neutral-200 rounded-lg shadow-sm overflow-hidden">
         <header class="px-5 py-3 border-b border-neutral-200 bg-neutral-50">
           <h3 class="text-sm font-semibold uppercase tracking-wide text-neutral-700">{{ t('reports.kh.section_a_title') }}</h3>
         </header>
         <table class="w-full text-sm">
           <tbody class="divide-y divide-neutral-100">
-            <tr>
+            <tr v-for="section in sectionARows" :key="section.code">
               <td class="px-5 py-2.5 text-neutral-700">
-                <strong class="font-mono">A.1</strong> — {{ t('reports.kh.a1_label') }}
+                <strong class="font-mono">{{ section.code }}</strong> — {{ t(section.labelKey) }}
               </td>
-              <td class="px-5 py-2.5 text-right font-mono">{{ preview.summary.a1_count }} {{ t('reports.kh.rows') }}</td>
-            </tr>
-            <tr>
-              <td class="px-5 py-2.5 text-neutral-700">
-                <strong class="font-mono">A.4</strong> — {{ t('reports.kh.a4_label') }}
+              <td class="px-5 py-2.5 text-right font-mono">
+                {{ section.count }} {{ t(section.aggregated ? 'reports.kh.aggregated' : 'reports.kh.rows') }}
               </td>
-              <td class="px-5 py-2.5 text-right font-mono">{{ preview.summary.a4_count }} {{ t('reports.kh.rows') }}</td>
-            </tr>
-            <tr>
-              <td class="px-5 py-2.5 text-neutral-700">
-                <strong class="font-mono">A.5</strong> — {{ t('reports.kh.a5_label') }}
-              </td>
-              <td class="px-5 py-2.5 text-right font-mono">{{ preview.summary.a5_count_aggregated }} {{ t('reports.kh.aggregated') }}</td>
             </tr>
           </tbody>
         </table>
@@ -189,23 +199,13 @@ onMounted(async () => {
         </header>
         <table class="w-full text-sm">
           <tbody class="divide-y divide-neutral-100">
-            <tr>
+            <tr v-for="section in sectionBRows" :key="section.code">
               <td class="px-5 py-2.5 text-neutral-700">
-                <strong class="font-mono">B.1</strong> — {{ t('reports.kh.b1_label') }}
+                <strong class="font-mono">{{ section.code }}</strong> — {{ t(section.labelKey) }}
               </td>
-              <td class="px-5 py-2.5 text-right font-mono">{{ preview.summary.b1_count }} {{ t('reports.kh.rows') }}</td>
-            </tr>
-            <tr>
-              <td class="px-5 py-2.5 text-neutral-700">
-                <strong class="font-mono">B.2</strong> — {{ t('reports.kh.b2_label') }}
+              <td class="px-5 py-2.5 text-right font-mono">
+                {{ section.count }} {{ t(section.aggregated ? 'reports.kh.aggregated' : 'reports.kh.rows') }}
               </td>
-              <td class="px-5 py-2.5 text-right font-mono">{{ preview.summary.b2_count }} {{ t('reports.kh.rows') }}</td>
-            </tr>
-            <tr>
-              <td class="px-5 py-2.5 text-neutral-700">
-                <strong class="font-mono">B.3</strong> — {{ t('reports.kh.b3_label') }}
-              </td>
-              <td class="px-5 py-2.5 text-right font-mono">{{ preview.summary.b3_count_aggregated }} {{ t('reports.kh.aggregated') }}</td>
             </tr>
           </tbody>
         </table>

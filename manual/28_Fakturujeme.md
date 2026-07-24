@@ -154,18 +154,42 @@ neplátci nad OSS prahem, faktura má mít:
 - Měna: typicky EUR
 - DPH se odvádí přes OSS, ne klasické přiznání
 
-**Workaround v MyInvoice:**
+**Postup v MyInvoice:**
 
 1. V `Nastavení → Číselníky → DPH sazby` přidej novou sazbu:
    - Kód: `SK-23`, Sazba: `23.00`, Země: `SK`, Label CS: „Standardní 23 % (SK)"
-2. V editoru faktury vyber tuto sazbu na položkách ručně.
+2. V editoru faktury vyber tuto sazbu na položkách ručně a u daného řádku
+   zaškrtni **OSS**. Vyplň zemi spotřeby (např. `SK`), typ sazby a typ plnění.
+   Volbu **Oprava období** ponech jako **Běžné plnění**.
 3. PDF doklad bude číselně správný (23 % SK DPH), klient ho dostane.
-4. **OSS hlášení vedeš mimo MyInvoice** — typicky v Pohodě / účetním softwaru
-   účetní. MyInvoice exportuje data (Pohoda XML), kde si účetní OSS označí.
+4. V **Nastavení → Daňové nastavení** zapni **OSS režim** a nastav zemi
+   identifikace (typicky `CZ`) a měnu podání (`EUR`).
+5. OSS přehled najdeš v **Daně → OSS přiznání**. Zobrazuje kvartální souhrn
+   ručně označených OSS řádků podle země spotřeby, sazby a měny podání.
+   Řádky označené jako OSS se nezahrnují do českého přiznání k DPH,
+   kontrolního hlášení ani Knihy DPH.
+6. Kliknutím na **Stáhnout XML** vygeneruješ EPO XML **OSSEI1** pro OSS EU
+   režim a záznam se uloží do **Archivu podání**.
 
-> ⚠️ MyInvoice nesleduje překročení OSS prahu, neeviduje OSS přiznání ani
-> nevypočítává DPH per země za reportovací období. **OSS evidence je
-> mimo scope aplikace.**
+Částky v jiné měně než je měna OSS podání se automaticky přepočítají k DUZP
+pomocí kurzovního lístku ČNB. Pokud kurz nelze získat, XML se nevytvoří a přehled
+upozorní, který doklad je potřeba opravit.
+
+Opravu přiznání po uplynutí termínu vykážeš v aktuálním čtvrtletí rozdílem:
+
+1. Na opravném řádku zapni **OSS** a nastav zemi spotřeby.
+2. V poli **Oprava období** vyber původní čtvrtletí. Řádek se nezahrne mezi
+   běžná plnění, ale do XML věty `VetaO`.
+3. Záporný dobropis sníží původní DPH, kladný opravný řádek ji zvýší.
+
+Dobropis vytvořený z OSS faktury z předchozího čtvrtletí převezme OSS údaje,
+obrátí částky a původní období nastaví automaticky. Dobropis ve stejném
+čtvrtletí zůstává běžným záporným plněním, protože přiznání lze před termínem
+podat znovu celé.
+
+> ⚠️ OSS XML je pomůcka pro podání v EPO. Uzávěrka období a automatické
+> hlídání prahu 10 000 EUR nejsou součástí exportu.
+> Před podáním vždy ověř sazby, režim B2C a přepočet s účetní.
 
 #### Reverse charge mimo EU
 
@@ -200,11 +224,11 @@ Aby bylo úplně jasno, kde je hranice:
 - ARES + VIES lookup (autocomplete IČO/DIČ)
 - Export pro účetní: **Pohoda XML, Stereo XML, ISDOC, PDF ZIP**
 - XML pro EPO portál MFČR: **DPH přiznání (DPHDP3), kontrolní hlášení,
-  souhrnné hlášení** — jako pomůcka k ověření s účetní
+  souhrnné hlášení a OSS přiznání (OSSEI1)** — jako pomůcka k ověření s účetní
 
 ### MyInvoice **nedělá**
 
-- OSS / IOSS přiznání
+- IOSS přiznání
 - Kompletní daň z příjmů (umí jen orientační kostru — viz
   [32. Daň z příjmů](32_Dan_z_prijmu.md)), sociální/zdravotní pojištění
 - Účetní deník nebo hlavní knihu

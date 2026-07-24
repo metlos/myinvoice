@@ -1,7 +1,7 @@
 # 13. Klienti
 
-Klient = firma nebo osoba, které vystavuješ faktury. Každý klient má alespoň
-jeden hlavní e-mail (povinný kontakt). Pod klientem můžeš mít jednu nebo více
+Klient = firma nebo osoba, které vystavuješ faktury. Hlavní e-mail je
+volitelný — u historických dokladů ho často neznáš. Pod klientem můžeš mít jednu nebo více
 **zakázek** (viz [14. Zakázky](14_Zakazky.md)) — typicky 1 zakázka = 1 projekt
 nebo dlouhodobá spolupráce.
 
@@ -42,7 +42,8 @@ Doporučený postup pro českého klienta:
 1. Zadej **IČO** (8 cifer).
 2. Klikni **Načíst z ARES** — server stáhne data z oficiálního registru a
    předvyplní: název firmy, DIČ, adresu, stát.
-3. Doplň **Hlavní e-mail** (povinný).
+3. (Volitelně) doplň **Hlavní e-mail** — bez něj klienta založíš, ale nepůjde
+   mu odeslat fakturu ani upomínku.
 4. (Volitelně) změň **Měnu** (CZK / EUR / …) a **Jazyk faktury** (CZ / EN).
 5. Pokud je klient z EU s DIČ, klikni **Ověřit DIČ (VIES)** — pokud je platné,
    přidáme stříbrný badge „VIES OK".
@@ -60,7 +61,7 @@ Doporučený postup pro českého klienta:
 | DIČ | Daňové ID s prefixem země; ČR „CZ12345678", SK „SK1234567890", EU různě. U slovenského klienta se pole jmenuje **IČ DPH** (viz § 13.2.1a) |
 | Národní daňové číslo | Zobrazí se jen u zemí, kde existuje vedle VAT ID: SK **DIČ**, DE/AT **Steuernummer**, PL **NIP**, HU **Adószám**. Tiskne se na fakturu mezi IČO a DIČ/IČ DPH |
 | Ulice / Město / PSČ / Stát | Adresa pro fakturu |
-| Hlavní e-mail | **Povinný** — pro odesílání faktur a upomínek |
+| Hlavní e-mail | Volitelný — pro odesílání faktur a upomínek. Bez něj se doklad odeslat nedá; vyplněný ale musí mít platný tvar |
 | Telefon | Volitelný |
 | Jazyk | `cs` nebo `en` — určuje jazyk PDF, e-mailových šablon, currency formátu |
 | Výchozí měna | Pro nové faktury (lze přepsat per faktura) |

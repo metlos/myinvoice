@@ -7,11 +7,15 @@ Aktuálně se podepisují PDF výstupy a vybrané odchozí e-maily.
 PDF výstupy:
 
 - vydaná faktura,
-- samostatný výkaz práce.
+- samostatný výkaz práce,
+- volitelně sloučené PDF v exportu vydaných faktur.
 
 Když je výkaz práce vložený jako další stránka PDF faktury, podpis výstupu
 **Vydaná faktura** pokrývá celé výsledné PDF včetně této stránky. Výstup
 **Výkaz práce** se používá pro samostatně generované PDF výkazu.
+Sloučený export se podepisuje až jako hotový celek a používá stejnou konfiguraci
+profilu jako výstup **Vydaná faktura**. Podpis se provede jen po zaškrtnutí
+volby v exportu; bez ní zůstane sloučené PDF nepodepsané.
 
 S/MIME e-mailové výstupy:
 
@@ -158,7 +162,7 @@ pro PDF podpisy:
 | **Použít časové razítko** | Zapne PAdES-T. Po zapnutí je povinná TSA URL. |
 | **TSA URL** | RFC 3161 endpoint časové autority, například URL služby poskytovatele časových razítek. |
 | **TSA jméno / heslo** | HTTP Basic auth, pokud ho TSA server vyžaduje. |
-| **Důvod podpisu** | Textový důvod v PDF podpisu. Když zůstane prázdný, použije se výchozí text podle typu dokumentu: `Faktura` nebo `Výkaz práce`. |
+| **Důvod podpisu** | Textový důvod v PDF podpisu. Když zůstane prázdný, použije se výchozí text podle typu dokumentu: `Faktura`, `Výkaz práce` nebo `Hromadný export faktur`. |
 
 Bez TSA se dokument podepíše jako PAdES-B. Pokud je TSA nastavená a dostupná,
 přidá se důvěryhodné časové razítko a výsledkem je PAdES-T.

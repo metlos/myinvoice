@@ -149,4 +149,96 @@ final class InvoiceValidationTest extends TestCase
 
         self::assertArrayNotHasKey('amount_to_pay', $err);
     }
+
+    public function testOssItemAcceptsPreviousReturnPeriod(): void
+    {
+        $data = $this->validOssInvoice();
+
+        self::assertSame([], InvoiceValidation::invoice($data));
+    }
+
+    public function testOssItemRejectsCurrentReturnPeriod(): void
+    {
+        $data = $this->validOssInvoice();
+        $data['items'][0]['oss_original_period'] = '2026Q3';
+
+        $err = InvoiceValidation::invoice($data);
+
+        self::assertArrayHasKey('items.0.oss_original_period', $err);
+    }
+
+    public function testOssItemRequiresIsoConsumerCountry(): void
+    {
+        $data = $this->validOssInvoice();
+        $data['items'][0]['oss_consumer_country'] = 'Slovensko';
+
+        $err = InvoiceValidation::invoice($data);
+
+        self::assertArrayHasKey('items.0.oss_consumer_country', $err);
+    }
+
+    public function testForeignVatRateRejectedOnNonOssItem(): void
+    {
+        $data = $this->validOssInvoice();
+        $data['items'][0]['oss_applicable'] = false;
+        $data['items'][0]['vat_rate_id'] = 7;
+
+        $err = InvoiceValidation::invoice($data, null, [7 => 'DE']);
+
+        self::assertArrayHasKey('items.0.vat_rate_id', $err);
+    }
+
+    public function testForeignVatRateAllowedOnOssItem(): void
+    {
+        $data = $this->validOssInvoice();
+        $data['items'][0]['vat_rate_id'] = 7;
+
+        $err = InvoiceValidation::invoice($data, null, [7 => 'DE']);
+
+        self::assertArrayNotHasKey('items.0.vat_rate_id', $err);
+    }
+
+    public function testDomesticVatRateUnaffectedByCountryCheck(): void
+    {
+        $data = $this->validOssInvoice();
+        $data['items'][0]['oss_applicable'] = false;
+
+        $err = InvoiceValidation::invoice($data, null, [1 => 'CZ']);
+
+        self::assertArrayNotHasKey('items.0.vat_rate_id', $err);
+    }
+
+    public function testOssRateTypeAllowlistMatchesExportableCodes(): void
+    {
+        $data = $this->validOssInvoice();
+        $data['items'][0]['oss_rate_type'] = 'zero';
+
+        $err = InvoiceValidation::invoice($data);
+
+        self::assertArrayHasKey('items.0.oss_rate_type', $err);
+    }
+
+    /** @return array<string,mixed> */
+    private function validOssInvoice(): array
+    {
+        return [
+            'invoice_type' => 'invoice',
+            'client_id' => 1,
+            'currency_id' => 1,
+            'issue_date' => '2026-07-15',
+            'due_date' => '2026-07-29',
+            'tax_date' => '2026-07-15',
+            'items' => [[
+                'description' => 'Syntetická OSS služba',
+                'quantity' => 1,
+                'unit_price_without_vat' => 100,
+                'vat_rate_id' => 1,
+                'oss_applicable' => true,
+                'oss_consumer_country' => 'SK',
+                'oss_rate_type' => 'standard',
+                'oss_supply_type' => 'services',
+                'oss_original_period' => '2026Q2',
+            ]],
+        ];
+    }
 }

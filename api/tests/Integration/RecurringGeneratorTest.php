@@ -1103,6 +1103,7 @@ final class RecurringGeneratorTest extends TestCase
             $container->get(\MyInvoice\Service\Pdf\InvoicePdfRenderer::class),
             $container->get(\MyInvoice\Service\Stats\StatsRecomputer::class),
             $container->get(\MyInvoice\Service\ActivityLogger::class),
+            $container->get(\MyInvoice\Service\Invoice\RecurringPriceListService::class),
         );
 
         $tplId = $this->createPeriodTemplate(

@@ -184,6 +184,34 @@ JSON response
 - Build: `pnpm build` → `web/dist/` → kopíruje se do `api/public/` při deploy (single origin)
 - PHP backend slouží i statiku v produkci (přes `index.html` fallback v `web.config`/`.htaccess`)
 
+### PWA — service worker
+
+`web/public/service-worker.js` se servíruje z rootu (`/service-worker.js`), aby měl scope `/`.
+Rewrite pravidla jsou v `.htaccess`, `web.config` i `docker/nginx.conf`; sám SW a
+`manifest.webmanifest` jdou vždy s `no-store`, aby se aktualizace nezablokovala.
+
+Strategie podle cesty:
+
+| Cesta | Strategie | Proč |
+| --- | --- | --- |
+| `/api`, `/api/*` | žádná cache (`cache: 'no-store'`) | fakturační data nesmí zastarat |
+| HTML navigace | SW nezachytává | `index.html` drží mapu na hash-chunky |
+| `/assets/`, `/pwa/` | cache-first | Vite hashuje názvy, ikony jsou stabilní |
+| `/styles/` | stale-while-revalidate | nehashovaná statika (`invoice.css`, `logo.svg`) — cache-first by ji držel až do bumpu `STATIC_CACHE` |
+
+Regresní testy: `pnpm test:pwa` (`web/tests/*.test.mjs`, běží i v CI).
+
+**Kill-switch.** Zaregistrovaný service worker žije v prohlížečích dál i po odstranění
+z kódu. Cesta zpět je `web/public/service-worker.kill.js` — odregistruje SW, smaže jeho
+cache a obnoví otevřená okna. Nasazení po buildu, před publikací:
+
+```
+cp web/public/service-worker.kill.js web/dist/service-worker.js
+```
+
+Registrace v `web/src/main.ts` se přitom nechává být (nainstaluje kill-switch, který se
+hned zase odregistruje). Odstranit ji jde, až budou klienti prokazatelně čistí.
+
 ## 4. IIS — `web.config`
 
 Klíčové pravidlo: SPA fallback (vše co není soubor a nezačíná `/api/` jde na `index.html`), API jde na `index.php`.

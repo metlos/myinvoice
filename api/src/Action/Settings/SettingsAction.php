@@ -12,6 +12,7 @@ use MyInvoice\Middleware\SupplierScopeMiddleware;
 use MyInvoice\Service\ActivityLogger;
 use MyInvoice\Service\IpMatcher;
 use MyInvoice\Service\Mail\RecipientResolver;
+use MyInvoice\Service\Mail\SafeLogoPath;
 use MyInvoice\Service\Pdf\InvoicePdfRenderer;
 use Psr\Http\Message\ResponseInterface as Response;
 use Psr\Http\Message\ServerRequestInterface as Request;
@@ -214,6 +215,24 @@ final class SettingsAction
         if ($id <= 0) return Json::error($response, 'validation_failed', 'Neplatné id.', 400);
 
         $body = (array) ($request->getParsedBody() ?? []);
+        if (!$this->supplierHasColumn('oss_enabled')) {
+            // Bez migrace 0137 sloupce neexistují. Formulář nastavení posílá OSS pole vždy
+            // (byť prázdná), takže tiché zahození je u výchozích hodnot v pořádku — ale pokus
+            // OSS reálně nastavit musí selhat hlasitě. Dřív se vracelo 200 a přepínač se jen
+            // vrátil zpět bez jakékoli hlášky.
+            $ossFields = ['oss_enabled', 'oss_valid_from', 'oss_valid_to', 'oss_identification_country', 'oss_return_currency'];
+            $wantsOss = !empty($body['oss_enabled']);
+            foreach (['oss_valid_from', 'oss_valid_to', 'oss_identification_country'] as $f) {
+                if (trim((string) ($body[$f] ?? '')) !== '') $wantsOss = true;
+            }
+            if ($wantsOss) {
+                return Json::error($response, 'migration_required',
+                    'Nastavení OSS vyžaduje databázovou migraci 0137_oss_foundation.sql. Spusťte php api/bin/migrate.php.', 409);
+            }
+            foreach ($ossFields as $f) {
+                unset($body[$f]);
+            }
+        }
 
         $allowed = [
             'company_name', 'display_name', 'street', 'city', 'zip', 'country_id',
@@ -231,11 +250,12 @@ final class SettingsAction
             'purchase_invoice_number_format',
             'invoice_number_period',
             // Per-supplier branding emailů (migrace 0016) + PDF logo+název (migrace 0058)
-            'email_branding_enabled', 'email_accent_color', 'pdf_logo_show_name',
+            'email_branding_enabled', 'email_accent_color', 'pdf_logo_show_name', 'branding_profiles_enabled',
             // Tax settings pro EPO výkazy (migrace 0038, fáze 6)
             'taxpayer_type', 'vat_period', 'financial_office_code', 'workplace_code',
-            'cz_nace_code', 'data_box_type', 'data_box_id', 'flat_tax_band',
+            'cz_nace_code', 'data_box_id', 'flat_tax_band',
             'sest_jmeno', 'sest_prijmeni', 'sest_telefon', 'sest_email', 'sest_funkce',
+            'oss_enabled', 'oss_valid_from', 'oss_valid_to', 'oss_identification_country', 'oss_return_currency',
             // Doplňky pro DPH/KH XML VetaP (migrace 0043)
             'street_number_pop', 'street_number_orient',
             'opr_jmeno', 'opr_prijmeni', 'opr_postaveni',
@@ -268,6 +288,29 @@ final class SettingsAction
             && !in_array($body['vat_period'], ['monthly', 'quarterly'], true)) {
             return Json::error($response, 'validation_failed', "vat_period musí být 'monthly' nebo 'quarterly'.", 400);
         }
+        if (array_key_exists('oss_identification_country', $body)) {
+            $v = strtoupper(trim((string) ($body['oss_identification_country'] ?? '')));
+            $body['oss_identification_country'] = $v === '' ? null : $v;
+            if ($body['oss_identification_country'] !== null && !preg_match('/^[A-Z]{2}$/', $body['oss_identification_country'])) {
+                return Json::error($response, 'validation_failed', 'oss_identification_country musí být ISO kód země (např. CZ).', 400);
+            }
+        }
+        if (array_key_exists('oss_return_currency', $body)) {
+            $v = strtoupper(trim((string) ($body['oss_return_currency'] ?? 'EUR')));
+            $body['oss_return_currency'] = $v === '' ? 'EUR' : $v;
+            if (!preg_match('/^[A-Z]{3}$/', $body['oss_return_currency'])) {
+                return Json::error($response, 'validation_failed', 'oss_return_currency musí být ISO kód měny (např. EUR).', 400);
+            }
+        }
+        foreach (['oss_valid_from', 'oss_valid_to'] as $field) {
+            if (!array_key_exists($field, $body)) continue;
+            $value = trim((string) ($body[$field] ?? ''));
+            if ($value === '') continue;
+            $date = \DateTimeImmutable::createFromFormat('Y-m-d', $value);
+            if ($date === false || $date->format('Y-m-d') !== $value) {
+                return Json::error($response, 'validation_failed', "{$field} musí být platné datum ve formátu RRRR-MM-DD.", 400);
+            }
+        }
         // Paušální daň pásmo — enum + podmínka §7a ZDP: paušalista nesmí být plátce DPH.
         if (array_key_exists('flat_tax_band', $body)) {
             $band = trim((string) ($body['flat_tax_band'] ?? ''));
@@ -293,7 +336,8 @@ final class SettingsAction
         }
         // Empty string → null pro tax fields (NULL = nevyplněno)
         foreach (['taxpayer_type', 'vat_period', 'financial_office_code', 'workplace_code',
-                  'cz_nace_code', 'data_box_type', 'data_box_id',
+                  'cz_nace_code', 'data_box_id',
+                  'oss_valid_from', 'oss_valid_to', 'oss_identification_country',
                   'sest_jmeno', 'sest_prijmeni', 'sest_telefon', 'sest_email', 'sest_funkce',
                   'street_number_pop', 'street_number_orient',
                   'opr_jmeno', 'opr_prijmeni', 'opr_postaveni'] as $f) {
@@ -381,7 +425,7 @@ final class SettingsAction
         foreach ($allowed as $f) {
             if (array_key_exists($f, $body)) {
                 $sets[] = "$f = ?";
-                $params[] = in_array($f, ['is_vat_payer', 'is_identified', 'auto_send_reminders', 'auto_generate_recurring', 'embed_isdoc', 'default_prices_include_vat', 'email_branding_enabled', 'pdf_logo_show_name', 'payment_thanks_enabled', 'payment_thanks_auto_send', 'payment_thanks_default_checked', 'payment_thanks_attach_paid_pdf'], true)
+                $params[] = in_array($f, ['is_vat_payer', 'is_identified', 'oss_enabled', 'auto_send_reminders', 'auto_generate_recurring', 'embed_isdoc', 'default_prices_include_vat', 'email_branding_enabled', 'pdf_logo_show_name', 'branding_profiles_enabled', 'payment_thanks_enabled', 'payment_thanks_auto_send', 'payment_thanks_default_checked', 'payment_thanks_attach_paid_pdf'], true)
                     ? ((int) (bool) $body[$f])
                     : $body[$f];
             }
@@ -486,6 +530,8 @@ final class SettingsAction
         $row['is_vat_payer']             = (bool) $row['is_vat_payer'];
         // Identifikovaná osoba (§ 6g–6l, issue #94) — doplněk k neplátci.
         $row['is_identified']            = (bool) ($row['is_identified'] ?? false);
+        $row['oss_enabled']              = (bool) ($row['oss_enabled'] ?? false);
+        $row['oss_return_currency']      = (string) ($row['oss_return_currency'] ?? 'EUR');
         $row['default_vat_rate_id']      = (int) $row['default_vat_rate_id'];
         $row['default_currency_id']      = (int) $row['default_currency_id'];
         $row['default_payment_due_days'] = (int) $row['default_payment_due_days'];
@@ -499,7 +545,11 @@ final class SettingsAction
         $row['email_branding_enabled']   = (bool) ($row['email_branding_enabled'] ?? false);
         $row['email_accent_color']       = (string) ($row['email_accent_color'] ?? '#3B2D83');
         $row['pdf_logo_show_name']       = (bool) ($row['pdf_logo_show_name'] ?? false);
-        $row['has_email_logo']           = is_file(\MyInvoice\Infrastructure\Config\RuntimePaths::storage('supplier-logos') . '/sup-' . $row['id'] . '.png');
+        $row['branding_profiles_enabled'] = (bool) ($row['branding_profiles_enabled'] ?? false);
+        $row['default_branding_profile_id'] = $row['default_branding_profile_id'] !== null
+            ? (int) $row['default_branding_profile_id']
+            : null;
+        $row['has_email_logo']           = SafeLogoPath::resolve($row['logo_path'] ?? null, $row['id']) !== null;
         $row['payment_thanks_enabled']        = (bool) ($row['payment_thanks_enabled'] ?? false);
         $row['payment_thanks_auto_send']      = (bool) ($row['payment_thanks_auto_send'] ?? false);
         $row['payment_thanks_default_checked']= (bool) ($row['payment_thanks_default_checked'] ?? false);
@@ -552,6 +602,11 @@ final class SettingsAction
     {
         $v = trim((string) ($b[$key] ?? ''));
         return $v === '' ? null : $v;
+    }
+
+    private function supplierHasColumn(string $column): bool
+    {
+        return $this->db->hasColumn('supplier', $column);
     }
 
     public function listCurrencies(Request $request, Response $response): Response

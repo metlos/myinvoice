@@ -7,6 +7,13 @@ MyInvoice.cz generuje XML pro EPO portál MFČR:
 Související výkazy a exporty mají v manuálu vlastní kapitoly: [Kniha DPH](30_Kniha_DPH.md)
 (interní žurnál), [Souhrnné hlášení](31_Souhrnne_hlaseni.md) (EU dodání B2B) a
 [Hromadný export](34_Hromadny_export.md) (ZIP balíček pro účetní). Všechny najdeš v menu **Daně**.
+OSS najdeš samostatně jako **Daně → OSS přiznání**; jde o kvartální podklad
+z ručně označených řádků a XML export pro EPO formulář **OSSEI1** (EU režim).
+Režim je ve výchozím stavu vypnutý — dokud ho v **Nastavení → firma** nezapneš,
+nenabízí se ani v menu, ani na řádcích faktury.
+Export obsahuje běžná plnění (`VetaR`) i opravy minulých období (`VetaO`).
+Opravy se v editoru položky označují původním čtvrtletím a ve výkazu se
+zobrazují odděleně včetně celkového dopadu na DPH.
 
 > [!WARNING]
 > **⚠️ Vygenerovaný XML je pouze pomůcka.** Před odesláním na EPO portál MFČR VŽDY ověř s účetní nebo daňovým poradcem. Aplikace nezaručuje regulatorní správnost — testováno na omezené sadě dat.
@@ -21,6 +28,7 @@ V **Nastavení → Daňové nastavení** vyplň:
 4. **Kód územního pracoviště (ÚzP)** — pokud existuje
 5. **DIČ** v Identifikaci firmy (povinné)
 6. Volitelně: CZ-NACE, datová schránka, sestavitel přiznání
+7. Volitelně pro OSS: OSS režim, země identifikace a měna podání
 
 Detailní mapping všech polí v UI na XML atributy najdeš v sekci [Pole EPO / VetaP](#pole-epo-vetap) níže.
 

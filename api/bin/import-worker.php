@@ -29,15 +29,20 @@ use MyInvoice\Service\Import\IdokladImportService;
 use MyInvoice\Service\Export\MonthlyExportService;
 use MyInvoice\Service\Document\DocumentJobService;
 
-// Parse args
+// STDOUT/STDERR existují pouze v CLI SAPI. Worker může být spuštěn také
+// z IIS/FastCGI, php-cgi nebo obdobného webového prostředí (sdílený hosting).
+$stdout = defined('STDOUT') ? STDOUT : fopen('php://stdout', 'wb');
+$stderr = defined('STDERR') ? STDERR : fopen('php://stderr', 'wb');
+
+// Parse args ($argv nemusí být mimo CLI dostupné)
 $jobId = null;
-foreach ($argv as $arg) {
+foreach (($argv ?? $_SERVER['argv'] ?? []) as $arg) {
     if (str_starts_with($arg, '--job-id=')) {
         $jobId = (int) substr($arg, 9);
     }
 }
 if ($jobId === null || $jobId <= 0) {
-    fwrite(STDERR, "Usage: php import-worker.php --job-id=N\n");
+    fwrite($stderr, "Usage: php import-worker.php --job-id=N\n");
     exit(1);
 }
 
@@ -52,16 +57,16 @@ $stmt = $pdo->prepare('SELECT supplier_id, source, status FROM import_jobs WHERE
 $stmt->execute([$jobId]);
 $row = $stmt->fetch(\PDO::FETCH_ASSOC);
 if ($row === false) {
-    fwrite(STDERR, "Job #{$jobId} nenalezen.\n");
+    fwrite($stderr, "Job #{$jobId} nenalezen.\n");
     exit(2);
 }
 if ($row['status'] !== 'queued') {
-    fwrite(STDERR, "Job #{$jobId} není ve stavu queued (current: {$row['status']}).\n");
+    fwrite($stderr, "Job #{$jobId} není ve stavu queued (current: {$row['status']}).\n");
     exit(3);
 }
 
 $source = (string) $row['source'];
-fwrite(STDOUT, "Starting import worker for job #{$jobId} (source: {$source})\n");
+fwrite($stdout, "Starting import worker for job #{$jobId} (source: {$source})\n");
 
 // Set time limit for long jobs (PHP CLI default = unlimited, but be explicit)
 set_time_limit(0);
@@ -83,10 +88,10 @@ try {
     }
 } catch (\Throwable $e) {
     // Service má vlastní try/catch — sem se dostane jen pro neexpected errors
-    fwrite(STDERR, "Unexpected error: " . $e->getMessage() . "\n");
+    fwrite($stderr, "Unexpected error: " . $e->getMessage() . "\n");
     $jobs->markFailed($jobId, 'Unexpected: ' . $e->getMessage());
     exit(5);
 }
 
-fwrite(STDOUT, "Job #{$jobId} finished.\n");
+fwrite($stdout, "Job #{$jobId} finished.\n");
 exit(0);

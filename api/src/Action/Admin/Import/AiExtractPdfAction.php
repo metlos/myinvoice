@@ -59,9 +59,15 @@ final class AiExtractPdfAction
         // ?model override
         $modelOverride = (string) ($request->getQueryParams()['model'] ?? '') ?: null;
 
+        // ?import_batch_id — označení dávky hromadného importu (#232), ať jde později
+        // dohledat co/kam se naimportovalo. Sanitizace na bezpečný krátký token.
+        $rawBatch = (string) ($request->getQueryParams()['import_batch_id'] ?? '');
+        $importBatchId = preg_replace('/[^A-Za-z0-9_-]/', '', $rawBatch);
+        $importBatchId = ($importBatchId !== '') ? substr($importBatchId, 0, 32) : null;
+
         $userId = (int) ($user['id'] ?? 0);
         $originalName = $file->getClientFilename() ?: null;
-        $result = $this->extractor->extractAndCreate($supplierId, $userId, $bytes, $modelOverride, $originalName);
+        $result = $this->extractor->extractAndCreate($supplierId, $userId, $bytes, $modelOverride, $originalName, $importBatchId);
 
         $ip = $this->ipMatcher->clientIpFromRequest($request->getServerParams());
         $this->logger->log('import.ai_extract', $userId, 'purchase_invoice',

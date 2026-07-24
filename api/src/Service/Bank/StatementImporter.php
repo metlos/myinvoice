@@ -6,6 +6,7 @@ namespace MyInvoice\Service\Bank;
 
 use MyInvoice\Infrastructure\Database\Connection;
 use PDO;
+use Psr\Log\LoggerInterface;
 
 /**
  * Persist naparsovaného výpisu do DB (GPC nebo bank-specifický PDF parser — obojí
@@ -20,6 +21,7 @@ final class StatementImporter
         // Cross-source dedup GPC ← e-mailové avízo: převezme párování (i manuální/split)
         // z už spárované avízo-transakce místo dvojího párování téže platby.
         private readonly EmailNoticeReconciler $reconciler,
+        private readonly LoggerInterface $logger,
     ) {}
 
     /**
@@ -217,16 +219,44 @@ final class StatementImporter
               WHERE account_number IS NOT NULL OR iban IS NOT NULL'
         );
         if ($stmt === false) return null;
+        $matches = [];
         foreach ($stmt->fetchAll(PDO::FETCH_ASSOC) as $row) {
             $iban = isset($row['iban']) && is_string($row['iban']) ? $row['iban'] : null;
             if (AccountNumberNormalizer::matchesAny($accountNumber, $row['account_number'] ?? null, $iban)) {
-                return [
+                $matches[] = [
                     'code'      => (string) $row['code'],
                     'bank_code' => isset($row['bank_code']) && (string) $row['bank_code'] !== '' ? (string) $row['bank_code'] : null,
                 ];
             }
         }
-        return null;
+        if ($matches === []) return null;
+
+        // #206: víc účtů se stejným číslem účtu, lišících se kódem banky (příp. měnou),
+        // nelze v NEINTERAKTIVNÍ cestě (folder scan / fallback měny) jednoznačně
+        // rozlišit — GPC hlavička kód banky vlastního účtu nenese. Interaktivní upload
+        // to řeší volbou účtu (BankStatementAction::resolveTargetCurrency → 409
+        // ambiguous_account_currency). Tady jen zalogujeme varování a vezmeme první
+        // shodu (zachování chování), ať se adresářový sken nezasekne.
+        if (count($matches) > 1) {
+            $variants = [];
+            foreach ($matches as $m) {
+                $variants[($m['bank_code'] ?? '?') . '/' . $m['code']] = true;
+            }
+            if (count($variants) > 1) {
+                $this->logger->warning(
+                    'Nejednoznačný účet při importu výpisu — použita první varianta. '
+                    . 'U interaktivního uploadu zvolte cílový účet ručně.',
+                    [
+                        'account_number' => $accountNumber,
+                        'match_count'    => count($matches),
+                        'variants'       => array_keys($variants),
+                        'used_bank_code' => $matches[0]['bank_code'] ?? '?',
+                        'used_currency'  => $matches[0]['code'],
+                    ]
+                );
+            }
+        }
+        return $matches[0];
     }
 
     /**

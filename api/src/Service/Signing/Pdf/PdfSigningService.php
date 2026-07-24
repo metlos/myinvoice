@@ -302,7 +302,7 @@ final class PdfSigningService
     private function configOutputEnabled(string $documentType): bool
     {
         $key = match ($documentType) {
-            'invoice' => 'invoices',
+            'invoice', 'bulk_invoice_export' => 'invoices',
             'work_report' => 'work_reports',
             default => $documentType,
         };
@@ -319,7 +319,11 @@ final class PdfSigningService
             return null;
         }
 
-        return $this->profiles->outputSetting($supplierId, $documentType);
+        // Hromadný export používá stejný profil a failure policy jako faktury,
+        // podpis se ale aplikuje až na výsledný sloučený dokument.
+        $outputType = $documentType === 'bulk_invoice_export' ? 'invoice' : $documentType;
+
+        return $this->profiles->outputSetting($supplierId, $outputType);
     }
 
     /**

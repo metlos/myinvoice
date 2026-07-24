@@ -10,6 +10,7 @@ use MyInvoice\Repository\ClientRepository;
 use MyInvoice\Repository\ImportJobRepository;
 use MyInvoice\Repository\InvoiceRepository;
 use MyInvoice\Repository\PurchaseInvoiceRepository;
+use MyInvoice\Service\Currency\ExchangeRateApplier;
 use MyInvoice\Service\Invoice\InvoiceCalculator;
 use MyInvoice\Service\Invoice\PurchaseInvoiceCalculator;
 use MyInvoice\Service\Invoice\SnapshotBuilder;
@@ -53,6 +54,7 @@ final class FakturoidImportService
         private readonly LoggerInterface $logger,
         private readonly PurchaseInvoiceCnbApplier $cnbApplier,
         private readonly SnapshotBuilder $snapshots,
+        private readonly ExchangeRateApplier $exchangeRateApplier,
     ) {}
 
     public function run(int $jobId): void
@@ -159,7 +161,7 @@ final class FakturoidImportService
                     'city'         => (string) ($subj['city'] ?? '—'),
                     'zip'          => (string) ($subj['zip'] ?? '00000'),
                     'country_iso2' => strtoupper((string) ($subj['country'] ?? 'CZ')),
-                    'main_email'   => (string) ($subj['email'] ?? '') ?: 'unknown@import.local',
+                    'main_email'   => (string) ($subj['email'] ?? '') ?: null,
                     'phone'        => (string) ($subj['phone'] ?? '') ?: null,
                     'language'     => 'cs',
                     'is_customer'  => $isCustomer,
@@ -266,6 +268,22 @@ final class FakturoidImportService
             ];
         }
         if (!empty($items)) $this->invoices->replaceItems($invoiceId, $items);
+
+        // #238: přenes měnový kurz. Fakturoid vrací pole `exchange_rate` (kurz, jímž
+        // byla faktura vystavena) — má přednost před ČNB. Když chybí, dopočti z ČNB
+        // k DUZP (ensureRate plní jen non-CZK doklad s NULL kurzem, nikdy nepřepíše).
+        // Bez tohoto by VatLedgerService použil náhradní kurz 1.0 → EUR základ by se
+        // do DPH/SH vykázal jako CZK.
+        $srcRate = isset($i['exchange_rate']) ? (float) $i['exchange_rate'] : 0.0;
+        if ($srcRate > 0 && strtoupper((string) ($i['currency'] ?? 'CZK')) !== 'CZK') {
+            $this->invoices->setExchangeRate(
+                $invoiceId,
+                $srcRate,
+                (string) ($payload['tax_date'] ?? '') ?: (string) $payload['issue_date'],
+            );
+        } else {
+            $this->exchangeRateApplier->ensureRate($invoiceId);
+        }
 
         // #121: promítni platební stav z Fakturoidu — zaplacené/stornované doklady
         // nesmí zůstat viset jako nezaplacené pohledávky (a chytat upomínky).

@@ -21,11 +21,11 @@ final class SnapshotBuilder
     /**
      * @return array{client: array, supplier: array, bank: ?array}
      */
-    public function build(int $clientId, int $currencyId, int $supplierId): array
+    public function build(int $clientId, int $currencyId, int $supplierId, ?int $brandingProfileId = null): array
     {
         return [
             'client'   => $this->clientSnapshot($clientId),
-            'supplier' => $this->supplierSnapshot($supplierId),
+            'supplier' => $this->supplierSnapshot($supplierId, $brandingProfileId),
             'bank'     => $this->bankSnapshot($currencyId),
         ];
     }
@@ -44,7 +44,6 @@ final class SnapshotBuilder
             throw new \RuntimeException("Client #$clientId nenalezen");
         }
         return [
-            'id'           => (int) $row['id'],
             'company_name' => $row['company_name'],
             'first_name'   => $row['first_name'],
             'last_name'    => $row['last_name'],
@@ -64,7 +63,7 @@ final class SnapshotBuilder
         ];
     }
 
-    private function supplierSnapshot(int $supplierId): array
+    private function supplierSnapshot(int $supplierId, ?int $brandingProfileId): array
     {
         $stmt = $this->db->pdo()->prepare(
             'SELECT s.*, co.iso2 AS country_iso2, co.name_cs AS country_name_cs, co.name_en AS country_name_en
@@ -77,7 +76,8 @@ final class SnapshotBuilder
         if (!$row) {
             throw new \RuntimeException("Supplier #$supplierId nenalezen.");
         }
-        return [
+        $snapshot = [
+            'id'           => (int) $row['id'],
             'company_name' => $row['company_name'],
             'display_name' => $row['display_name'],
             'street'       => $row['street'],
@@ -98,6 +98,25 @@ final class SnapshotBuilder
             'tagline'      => $row['tagline'] ?? null,
             'commercial_register' => $row['commercial_register'] ?? null,
         ];
+
+        if ($brandingProfileId === null) {
+            return $snapshot;
+        }
+
+        $profileStmt = $this->db->pdo()->prepare(
+            'SELECT bp.* FROM branding_profiles bp
+               JOIN supplier s ON s.id = bp.supplier_id AND s.branding_profiles_enabled = 1
+              WHERE bp.id = ? AND bp.supplier_id = ? AND bp.is_active = 1'
+        );
+        $profileStmt->execute([$brandingProfileId, $supplierId]);
+        $profile = $profileStmt->fetch(PDO::FETCH_ASSOC);
+        if (!$profile) {
+            throw new \InvalidArgumentException("Brandingový profil #$brandingProfileId nenalezen.");
+        }
+
+        $snapshot = \MyInvoice\Service\Branding\BrandingProfileOverlay::apply($snapshot, $profile);
+        $snapshot['branding_profile_name'] = $profile['name'];
+        return $snapshot;
     }
 
     private function bankSnapshot(int $currencyId): ?array

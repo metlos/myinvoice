@@ -2,8 +2,8 @@ import { api } from './client'
 
 export interface BankStatement {
   id: number
-  /** Zdroj výpisu: 'gpc' = nahraný/importovaný GPC výpis, 'pdf' = rozparsovaný PDF výpis (banka bez GPC exportu), 'email_notice' = měsíční agregát e-mailových avíz. */
-  source?: 'gpc' | 'pdf' | 'email_notice'
+  /** Zdroj výpisu: 'gpc' = nahraný/importovaný GPC výpis, 'pdf' = rozparsovaný PDF výpis (banka bez GPC exportu), 'email_notice' = měsíční agregát e-mailových avíz, 'idoklad' = měsíční agregát pohybů z iDokladu. */
+  source?: 'gpc' | 'pdf' | 'email_notice' | 'idoklad'
   file_name: string
   account_number: string
   /** Kód banky (4místný), pokud je u výpisu evidovaný — pro zobrazení „účet / kód". */
@@ -17,6 +17,8 @@ export interface BankStatement {
   curr_balance: number
   transaction_count: number
   matched_count: number
+  /** Položky převzaté oficiálním výpisem (match_status='ignored') — u sekundárních zdrojů. */
+  ignored_count?: number
   imported_at: string
   has_file: boolean
   /** Je k výpisu přiložené PDF (bank_statements.pdf_content)? */
@@ -29,8 +31,8 @@ export type MatchStatus = 'unmatched' | 'auto_exact' | 'auto_partial' | 'manual'
 
 export interface BankTransaction {
   id: number
-  /** 'statement' = z nahraného výpisu, 'email_notice' = z e-mailového avíza. */
-  source?: 'statement' | 'email_notice'
+  /** 'statement' = z nahraného výpisu, 'email_notice' = z e-mailového avíza, 'idoklad' = z pohybu importovaného z iDokladu. */
+  source?: 'statement' | 'email_notice' | 'idoklad'
   statement_id: number
   posted_at: string
   amount: number
@@ -126,11 +128,18 @@ export interface ImportResult {
   duplicate: boolean
 }
 
-/** Kandidát měnového účtu při nejednoznačném sdíleném čísle účtu (#167). */
+/**
+ * Kandidát bankovního účtu při nejednoznačném sdíleném čísle účtu. Nastane, když
+ * jednomu číslu účtu odpovídá víc účtů dodavatele — buď různými měnami (#167),
+ * nebo různým kódem banky (#206, stejné číslo u dvou bank). `label` už je
+ * server-side složený tak, aby oba případy odlišil (měna + číslo/kód banky).
+ */
 export interface AmbiguousAccount {
   account_id: number
   code: string
   label: string
+  bank_code?: string | null
+  account_number?: string
 }
 
 /** Účet pro filtr v přehledu výpisů (distinct account_number + jeho label z currencies). */
@@ -158,6 +167,7 @@ export interface BankListParams {
   year?: number | ''
   month?: number | ''
   account?: string
+  bank_code?: string
 }
 
 /** Jeden bod měsíční řady zůstatku (nativní měna účtu). */
@@ -184,7 +194,7 @@ export interface AccountBalance {
   /** Datum, ke kterému aktuální stav platí (výpis / avízo). */
   statement_date: string
   /** Odkud aktuální stav pochází: GPC výpis, nebo disponibilní zůstatek z avíza. */
-  current_source: 'gpc' | 'email_notice'
+  current_source: 'gpc' | 'pdf' | 'email_notice'
   statement_count: number
   months: AccountBalanceMonth[]
 }
@@ -195,6 +205,13 @@ export interface AccountBalancesResponse {
   total_czk: {
     current: number
     months: { month: string; balance_czk: number | null }[]
+    series: {
+      account_id: number
+      label: string
+      account_number: string
+      bank_code: string | null
+      months: { month: string; balance_czk: number | null }[]
+    }[]
   }
   /** Měny bez jakéhokoli kurzu v cache (nešly přepočíst na CZK). */
   missing_rates: string[]
@@ -207,6 +224,7 @@ export const bankApi = {
       ...(params.year !== undefined && params.year !== '' ? { 'filter[year]': params.year } : {}),
       ...(params.month !== undefined && params.month !== '' ? { 'filter[month]': params.month } : {}),
       ...(params.account ? { 'filter[account]': params.account } : {}),
+      ...(params.bank_code ? { 'filter[bank_code]': params.bank_code } : {}),
     } }).then(r => r.data),
   get: (id: number) => api.get<BankStatementDetail>(`/bank-statements/${id}`).then(r => r.data),
   /** Přehled zůstatků na účtech dle GPC výpisů (tabulka + měsíční vývoj + CZK součet). */

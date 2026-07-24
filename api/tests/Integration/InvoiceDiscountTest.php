@@ -162,6 +162,40 @@ final class InvoiceDiscountTest extends TestCase
         $this->assertEqualsWithDelta(900.0, (float) $inv['vat_breakdown'][0]['base'], 0.011);
     }
 
+    public function testOssDiscountCopiesMetadataAndReducesReturnAmounts(): void
+    {
+        $hasOssColumns = $this->db->pdo()
+            ->query("SHOW COLUMNS FROM invoice_items LIKE 'oss_applicable'")
+            ->fetchColumn();
+        if ($hasOssColumns === false) {
+            $this->markTestSkipped('OSS migrace není aplikovaná');
+        }
+
+        $inv = $this->createWithDiscount(10.0, [[
+            'description'                  => 'TEST OSS položka (PHPUnit)',
+            'quantity'                     => 1,
+            'unit'                         => 'ks',
+            'unit_price_without_vat'       => 1000,
+            'vat_rate_id'                  => $this->vatRateId,
+            'order_index'                  => 0,
+            'oss_applicable'               => true,
+            'oss_consumer_country'         => 'DE',
+            'oss_rate_type'                => 'standard',
+            'oss_supply_type'              => 'goods',
+            'oss_taxable_amount_return'    => 40.0,
+            'oss_vat_amount_return'        => 7.6,
+        ]]);
+
+        $discountItems = array_values(array_filter($inv['items'], fn ($it) => $it['item_kind'] === 'discount'));
+        $this->assertCount(1, $discountItems);
+        $this->assertTrue($discountItems[0]['oss_applicable']);
+        $this->assertSame('DE', $discountItems[0]['oss_consumer_country']);
+        $this->assertSame('standard', $discountItems[0]['oss_rate_type']);
+        $this->assertSame('goods', $discountItems[0]['oss_supply_type']);
+        $this->assertEqualsWithDelta(-4.0, (float) $discountItems[0]['oss_taxable_amount_return'], 0.001);
+        $this->assertEqualsWithDelta(-0.76, (float) $discountItems[0]['oss_vat_amount_return'], 0.001);
+    }
+
     public function testZeroDiscountAddsNoDiscountLine(): void
     {
         $inv = $this->createWithDiscount(0.0, [[

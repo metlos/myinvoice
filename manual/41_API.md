@@ -151,7 +151,8 @@ Veřejný subset nastavení dodavatele jde měnit tokenem se scope `read_write`
   `proforma_number_format`, `credit_note_number_format`,
   `purchase_invoice_number_format`, `invoice_number_period`) a **branding**
   (`email_branding_enabled`, `email_accent_color`, `pdf_logo_show_name`,
-  `display_name`, `tagline`). Logo se přes tento endpoint nastavit nedá.
+  `display_name`, `tagline`). Tato pole představují původní nastavení dodavatele,
+  které se používá při vypnutých brandingových profilech. Logo se přes tento endpoint nastavit nedá.
 
 - **`PUT /api/v1/settings/supplier/invoice-counter`** — nastaví counter číselné
   řady tak, aby příští vystavený doklad dostal zadané číslo. Hodí se při
@@ -172,7 +173,8 @@ dokladem, vystavení se samoopravně posune na první volné číslo — duplici
 
 - **`POST /api/v1/settings/supplier/logo`** — multipart upload loga (pole
   `file`; PNG / JPG / SVG / WebP, max 1 MiB). Logo se v e-mailech a PDF
-  zobrazuje při `email_branding_enabled = true`. `DELETE` na stejné cestě
+  ukládá do původního nastavení dodavatele a zobrazuje při zapnutém brandingu.
+  `DELETE` na stejné cestě
   logo odebere:
 
 ```bash
@@ -180,14 +182,58 @@ curl -X POST https://mojefirma.example/api/v1/settings/supplier/logo \
   -H "Authorization: Bearer $TOKEN" \
   -F "file=@logo.png"
 # → { "logo_path": "storage/supplier-logos/sup-1.png", "width": 480, "height": 160 }
+```
 
-## 41.9 Export faktur přes API
+## 41.9 Brandingový profil faktury
+
+Po zapnutí modulu brandingových profilů vrací aktivní profily aktuálního
+dodavatele read-only endpoint:
+
+```bash
+curl -H "Authorization: Bearer $TOKEN" \
+  https://mojefirma.example/api/v1/branding-profiles
+```
+
+Hodnotu `id` lze poslat při vytvoření konceptu faktury:
+
+```bash
+curl -X POST https://mojefirma.example/api/v1/invoices \
+  -H "Authorization: Bearer $TOKEN" \
+  -H "Content-Type: application/json" \
+  -d '{
+    "client_id": 123,
+    "branding_profile_id": 5,
+    "issue_date": "2026-07-20",
+    "due_date": "2026-08-03",
+    "items": [{
+      "description": "Konzultační služby",
+      "quantity": 1,
+      "unit": "h",
+      "unit_price_without_vat": 2500,
+      "vat_rate_id": 1
+    }]
+  }'
+```
+
+Profil musí být aktivní a patřit stejnému dodavateli jako klient. Jinak API
+vrátí HTTP 400 s kódem `integrity_violation`. Když `branding_profile_id` v těle
+chybí nebo je `null`, nový koncept převezme výchozí profil klienta a následně
+výchozí profil dodavatele. Není-li žádný nastaven, použije základní identitu.
+
+Při vystavení se výsledná identita včetně cesty k verzi loga uloží do snapshotu
+faktury. Pozdější úprava profilu tedy již vystavený doklad nezmění.
+
+## 41.10 Export faktur přes API
 
 - **`GET /api/v1/invoices/export?format=pdf-zip|isdoc|pohoda|stereo&month=YYYY-MM`**
   — hromadný export vystavených dokladů za měsíc (nebo
   `period=quarterly&year=YYYY&quarter=1..4`). PDF ZIP, ISDOC, Pohoda či Stereo
-  XML; `date_by=tax` zařazuje dle DUZP (shodně s výkazy DPH). Stejná logika
-  jako interní `Daně → Hromadný export`, dostupná integračně.
+  XML; `date_by=tax` zařazuje dle DUZP (shodně s výkazy DPH). Pro PDF lze
+  `merge_pdf=true` vrátit jeden soubor místo ZIPu a současně `sign_pdf=true`
+  podepsat výsledný celek.
+- **`GET /api/v1/invoices/export.pdf?ids=125,124,119`** — spojí nejvýše 100
+  konkrétních faktur do jednoho PDF v uvedeném pořadí. Výstup neobsahuje přílohy,
+  ISDOC ani výkazy práce. Volitelné `sign_pdf=true` podepíše výsledný soubor.
 - **`GET /api/v1/invoices/{id}/isdoc`** — ISDOC XML jedné vystavené faktury
   (koncept nelze, 400). PDF varianta existovala už dřív
   (`GET /api/v1/invoices/{id}/pdf`).
@@ -197,7 +243,7 @@ curl -H "Authorization: Bearer $TOKEN" -OJ \
   "https://mojefirma.example/api/v1/invoices/export?format=isdoc&month=2026-06"
 ```
 
-## 41.10 Bezpečnost tokenů — best practices
+## 41.11 Bezpečnost tokenů — best practices
 
 - **Ukládej token jako secret** (password manager, Make encrypted variable, GitHub Secrets…).
   Nepushuj do gitu.
@@ -208,7 +254,7 @@ curl -H "Authorization: Bearer $TOKEN" -OJ \
 - **Sleduj `last_used_at`** v UI — token, který se 3 měsíce nepoužil, asi nepotřebuješ.
 - **Při ztrátě/podezření** — okamžitě **Zrušit** v UI. Revokace je instantní (žádný cache).
 
-## 41.11 Co API nepokrývá
+## 41.12 Co API nepokrývá
 
 - **Admin a settings endpointy** (`/api/admin/*` a `/api/settings/*` mimo
   veřejný subset — supplier, číselníky) nejsou v `openapi.yaml` - jsou určené

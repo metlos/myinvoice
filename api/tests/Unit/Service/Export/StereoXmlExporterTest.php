@@ -175,6 +175,31 @@ final class StereoXmlExporterTest extends TestCase
         return $node?->textContent;
     }
 
+    public function testOssRowIsRejectedInsteadOfExportedAsDomesticExempt(): void
+    {
+        // Bez guardu resolver propadne u DE 19 % na klasifikaci '3' → TypeOfVAT "UO"
+        // (tuzemské osvobozené plnění), takže by se OSS plnění naimportovalo do účetnictví
+        // se špatným zařazením.
+        $this->expectException(\RuntimeException::class);
+        $this->expectExceptionMessageMatches('/OSS/');
+
+        $this->exporter->buildXml([$this->invoice([
+            'client_snapshot' => ['company_name' => 'Kunde GmbH', 'country_iso2' => 'DE'],
+            'items' => [$this->item([
+                'vat_rate_snapshot' => 19.0,
+                'oss_applicable' => 1,
+                'oss_consumer_country' => 'DE',
+            ])],
+        ])]);
+    }
+
+    public function testNonOssInvoiceStillExports(): void
+    {
+        $xml = $this->exporter->buildXml([$this->invoice()]);
+
+        self::assertStringContainsString('<TypeOfVAT>U</TypeOfVAT>', $xml);
+    }
+
     /**
      * @param array<string,mixed> $overrides
      * @return array<string,mixed>

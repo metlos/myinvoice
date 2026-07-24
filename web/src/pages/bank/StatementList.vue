@@ -31,8 +31,17 @@ const DEFAULT_YEAR = new Date().getFullYear()
 const yearFilter = ref<number | ''>('')
 const monthFilter = ref<number | ''>('')
 const accountFilter = ref<string>('')
+const bankCodeFilter = ref<string>('')
 const years = ref<number[]>([])
 const accounts = ref<BankAccountOption[]>([])
+const accountFilterKey = computed({
+  get: () => accountFilter.value ? `${accountFilter.value}|${bankCodeFilter.value}` : '',
+  set: (value: string) => {
+    const separator = value.lastIndexOf('|')
+    accountFilter.value = separator >= 0 ? value.slice(0, separator) : value
+    bankCodeFilter.value = separator >= 0 ? value.slice(separator + 1) : ''
+  },
+})
 
 // `tm()` vrací raw pole zpráv, `rt()` zformátuje jednotlivé položky (interpolace).
 const monthOptions = computed(() => (tm('common.months_short') as unknown as string[]).map(m => rt(m)))
@@ -59,6 +68,7 @@ function resetFilters() {
   yearFilter.value = ''
   monthFilter.value = ''
   accountFilter.value = ''
+  bankCodeFilter.value = ''
 }
 const uploading = ref(false)
 const scanning = ref(false)
@@ -131,6 +141,7 @@ async function load() {
       year: yearFilter.value,
       month: monthFilter.value,
       account: accountFilter.value || undefined,
+      bank_code: bankCodeFilter.value || undefined,
     })
     statements.value = r.items
     total.value = r.total
@@ -153,6 +164,7 @@ function loadFiltersFromQuery(q: typeof route.query) {
     : ''
   monthFilter.value = typeof q.month === 'string' && q.month !== '' ? Number(q.month) : ''
   accountFilter.value = typeof q.account === 'string' ? q.account : ''
+  bankCodeFilter.value = typeof q.bank === 'string' ? q.bank : ''
 }
 function syncFiltersToUrl() {
   if (suppressUrlSync) return
@@ -160,10 +172,11 @@ function syncFiltersToUrl() {
   if (yearFilter.value !== '') q.year = String(yearFilter.value)
   if (monthFilter.value !== '') q.month = String(monthFilter.value)
   if (accountFilter.value) q.account = accountFilter.value
+  if (bankCodeFilter.value) q.bank = bankCodeFilter.value
   router.replace({ query: q })
 }
 
-watch([yearFilter, monthFilter, accountFilter], () => {
+watch([yearFilter, monthFilter, accountFilter, bankCodeFilter], () => {
   page.value = 1
   syncFiltersToUrl()
   load()
@@ -178,6 +191,7 @@ watch(() => route.query, (newQ) => {
     yearFilter.value = ''
     monthFilter.value = ''
     accountFilter.value = ''
+    bankCodeFilter.value = ''
     page.value = 1
     load()
     setTimeout(() => { suppressUrlSync = false }, 0)
@@ -189,11 +203,30 @@ onMounted(() => {
   load()
 })
 
-// E-mailová avíza jsou měsíční agregát (statement_date = 1. den měsíce), proto
-// u nich nedává smysl ukazovat konkrétní datum — zobrazíme název měsíce
-// (sdílený `monthLabel` níže přijímá 'YYYY-MM').
+// E-mailová avíza a iDoklad pohyby jsou měsíční agregát, proto u nich nedává smysl
+// ukazovat konkrétní datum — zobrazíme název měsíce (sdílený `monthLabel` níže
+// přijímá 'YYYY-MM').
 function statementDateLabel(s: BankStatement): string {
-  return s.source === 'email_notice' ? monthLabel((s.statement_date ?? '').slice(0, 7)) : formatDate(s.statement_date)
+  return isVirtualSource(s) ? monthLabel((s.statement_date ?? '').slice(0, 7)) : formatDate(s.statement_date)
+}
+
+// Virtuální (sekundární) zdroje — nejde o nahraný soubor z banky, ale o agregát.
+function isVirtualSource(s: BankStatement): boolean {
+  return s.source === 'email_notice' || s.source === 'idoklad'
+}
+
+// Badge zdroje pro ne-GPC výpisy; GPC (výchozí zdroj) badge nemá.
+function sourceBadge(s: BankStatement): { label: string; hint: string } | null {
+  if (s.source === 'email_notice') return { label: t('bank.email_notice_badge'), hint: t('bank.email_notice_hint') }
+  if (s.source === 'pdf') return { label: t('bank.pdf_source_badge'), hint: t('bank.pdf_source_hint') }
+  if (s.source === 'idoklad') return { label: t('bank.idoklad_source_badge'), hint: t('bank.idoklad_source_hint') }
+  return null
+}
+
+// Položky převzaté oficiálním výpisem zůstávají jako 'ignored' — jsou vyřešené,
+// jen ne „spárované". Bez nich by sekundární výpis nikdy nezezelenal.
+function isFullyResolved(s: BankStatement): boolean {
+  return s.matched_count + (s.ignored_count ?? 0) >= s.transaction_count
 }
 
 // Seskupení výpisů po měsících (YYYY-MM z statement_date), zachová pořadí ze
@@ -259,7 +292,7 @@ async function onFileSelected(e: Event) {
     try {
       results.push(await uploadFn(file))
     } catch (e) {
-      // #167: sdílené číslo účtu napříč měnami → nech uživatele zvolit cílový účet a zkus znovu.
+      // #167/#206: sdílené číslo účtu (napříč měnami nebo bankami) → nech uživatele zvolit cílový účet a zkus znovu.
       const candidates = ambiguousCandidates(e)
       if (candidates) {
         const accountId = await askForAccount(file.name, candidates)
@@ -337,10 +370,14 @@ async function onFileSelected(e: Event) {
         <option :value="''">{{ t('bank.all_months') }}</option>
         <option v-for="(label, i) in monthOptions" :key="i + 1" :value="i + 1">{{ label }}</option>
       </select>
-      <select v-if="accounts.length > 1" v-model="accountFilter"
+      <select v-if="accounts.length > 1" v-model="accountFilterKey"
         class="h-9 px-3 border border-neutral-300 rounded-md bg-surface text-sm">
         <option value="">{{ t('bank.all_accounts') }}</option>
-        <option v-for="a in accounts" :key="a.account_number" :value="a.account_number">{{ accountLabel(a) }}</option>
+        <option
+          v-for="a in accounts"
+          :key="`${a.account_number}|${a.bank_code ?? ''}`"
+          :value="`${a.account_number}|${a.bank_code ?? ''}`"
+        >{{ accountLabel(a) }}</option>
       </select>
     </FilterBar>
 
@@ -392,13 +429,9 @@ async function onFileSelected(e: Event) {
             <td class="px-3 py-2 text-xs">
               <span class="inline-flex items-center gap-1.5">
                 <span>{{ statementDateLabel(s) }}</span>
-                <span v-if="s.source === 'email_notice'" :title="t('bank.email_notice_hint')"
+                <span v-if="sourceBadge(s)" :title="sourceBadge(s)!.hint"
                   class="text-[10px] px-1.5 py-0.5 rounded bg-neutral-100 text-neutral-500 font-medium">
-                  {{ t('bank.email_notice_badge') }}
-                </span>
-                <span v-else-if="s.source === 'pdf'" :title="t('bank.pdf_source_hint')"
-                  class="text-[10px] px-1.5 py-0.5 rounded bg-neutral-100 text-neutral-500 font-medium">
-                  {{ t('bank.pdf_source_badge') }}
+                  {{ sourceBadge(s)!.label }}
                 </span>
                 <span v-if="s.statement_number" class="text-neutral-400">#{{ s.statement_number }}</span>
               </span>
@@ -416,7 +449,7 @@ async function onFileSelected(e: Event) {
             <td class="px-3 py-2 text-center">{{ s.transaction_count }}</td>
             <td class="px-3 py-2 text-center">
               <span class="text-xs px-2 py-0.5 rounded font-medium"
-                :class="s.matched_count === s.transaction_count ? 'bg-success-50 text-success-600' : 'bg-warning-50 text-warning-600'">
+                :class="isFullyResolved(s) ? 'bg-success-50 text-success-600' : 'bg-warning-50 text-warning-600'">
                 {{ s.matched_count }} / {{ s.transaction_count }}
               </span>
             </td>
@@ -459,13 +492,9 @@ async function onFileSelected(e: Event) {
           <div class="flex items-baseline justify-between gap-2">
             <div class="font-medium text-neutral-900 flex items-center gap-1.5 flex-wrap">
               {{ statementDateLabel(s) }}<span v-if="s.statement_number" class="text-neutral-400 ml-1">#{{ s.statement_number }}</span>
-              <span v-if="s.source === 'email_notice'" :title="t('bank.email_notice_hint')"
+              <span v-if="sourceBadge(s)" :title="sourceBadge(s)!.hint"
                 class="text-[10px] px-1.5 py-0.5 rounded bg-neutral-100 text-neutral-500 font-medium">
-                {{ t('bank.email_notice_badge') }}
-              </span>
-              <span v-else-if="s.source === 'pdf'" :title="t('bank.pdf_source_hint')"
-                class="text-[10px] px-1.5 py-0.5 rounded bg-neutral-100 text-neutral-500 font-medium">
-                {{ t('bank.pdf_source_badge') }}
+                {{ sourceBadge(s)!.label }}
               </span>
               <span v-if="s.currency" class="text-xs px-1.5 py-0.5 rounded bg-neutral-100 text-neutral-700 font-medium">{{ s.currency }}</span>
             </div>
@@ -477,7 +506,7 @@ async function onFileSelected(e: Event) {
           <div class="flex items-baseline justify-between gap-2 mt-2">
             <span class="text-xs text-neutral-500">{{ s.transaction_count }} transakcí</span>
             <span class="text-xs px-2 py-0.5 rounded font-medium whitespace-nowrap"
-              :class="s.matched_count === s.transaction_count ? 'bg-success-50 text-success-600' : 'bg-warning-50 text-warning-600'">
+              :class="isFullyResolved(s) ? 'bg-success-50 text-success-600' : 'bg-warning-50 text-warning-600'">
               {{ s.matched_count }} / {{ s.transaction_count }} {{ t('bank.matched') }}
             </span>
           </div>
@@ -515,7 +544,7 @@ async function onFileSelected(e: Event) {
       </div>
     </nav>
 
-    <!-- #167: volba cílového měnového účtu u sdíleného čísla účtu. Bez click-outside. -->
+    <!-- #167/#206: volba cílového účtu u sdíleného čísla účtu (různá měna nebo kód banky). Bez click-outside. -->
     <div v-if="ambiguityModal" class="fixed inset-0 z-50 flex items-center justify-center bg-black/40 p-4">
       <div class="bg-surface border border-neutral-200 rounded-lg shadow-xl w-full max-w-md p-5">
         <div class="flex items-start gap-3 mb-3">

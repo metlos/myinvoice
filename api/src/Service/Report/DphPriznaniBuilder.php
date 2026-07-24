@@ -71,6 +71,14 @@ final class DphPriznaniBuilder
         }
 
         $lines = $this->mapper->aggregateForDphPriznani($supplierId, $year, $month, $period);
+        // #238: doklady v cizí měně bez kurzu — NEházíme chybu, vrátíme je v
+        // `missing_rates` a akce je při stažení doplní z ČNB (náhled jen varuje).
+        $missingRates = $this->mapper->missingRatesForPeriod($supplierId, $year, $month, $period);
+        if ($missingRates !== []) {
+            $warnings[] = 'Chybí kurz u dokladů v cizí měně: '
+                . implode(', ', \MyInvoice\Service\Report\VatLedgerService::missingExchangeRateLabels($missingRates))
+                . '. Při stažení XML se doplní z ČNB.';
+        }
         $this->appendSalesDataWarnings($supplierId, $year, $month, $period, $warnings);
         if ($isIdentified) {
             $lines = $this->filterLinesForIdentified($lines, $warnings);
@@ -331,6 +339,7 @@ final class DphPriznaniBuilder
             'xml'      => $dom->saveXML() ?: '',
             'summary'  => $summary,
             'warnings' => $warnings,
+            'missing_rates' => $missingRates,
         ];
     }
 
@@ -350,6 +359,13 @@ final class DphPriznaniBuilder
         $end = (new \DateTimeImmutable(sprintf('%04d-%02d-01', $year, $endMonth)))
             ->modify('last day of this month')->format('Y-m-d');
 
+        // Čistě OSS dobropis nesnižuje tuzemskou daň na výstupu (jeho záporná DPH je zahraniční),
+        // takže by § 42 varování jen mátlo. Vyžadujeme aspoň jeden ne-OSS řádek.
+        $creditNoteOssFilter = $this->db->hasColumn('invoice_items', 'oss_applicable')
+            ? "AND EXISTS (SELECT 1 FROM invoice_items cii
+                            WHERE cii.invoice_id = invoices.id
+                              AND COALESCE(cii.oss_applicable, 0) = 0)"
+            : '';
         $creditNotes = $this->db->pdo()->prepare(
             "SELECT varsymbol
                FROM invoices
@@ -358,6 +374,7 @@ final class DphPriznaniBuilder
                 AND invoice_type = 'credit_note'
                 AND (total_without_vat < 0 OR total_vat < 0)
                 AND COALESCE(tax_date, issue_date) BETWEEN ? AND ?
+                {$creditNoteOssFilter}
            ORDER BY COALESCE(tax_date, issue_date), id"
         );
         $creditNotes->execute([$supplierId, $start, $end]);
@@ -365,6 +382,9 @@ final class DphPriznaniBuilder
             $warnings[] = "Dobropis {$number} snižuje daň na výstupu. Ověřte, že datum zařazení odpovídá doručení opravného daňového dokladu nebo vynaložení rozumného úsilí o jeho doručení (§ 42 ZDPH).";
         }
 
+        $ossFilter = $this->db->hasColumn('invoice_items', 'oss_applicable')
+            ? 'AND COALESCE(ii.oss_applicable, 0) = 0'
+            : '';
         $unclassifiedZero = $this->db->pdo()->prepare(
             "SELECT DISTINCT i.varsymbol
                FROM invoices i
@@ -375,6 +395,7 @@ final class DphPriznaniBuilder
                 AND COALESCE(i.tax_date, i.issue_date) BETWEEN ? AND ?
                 AND COALESCE(i.reverse_charge, 0) = 0
                 AND ii.vat_rate_snapshot = 0
+                {$ossFilter}
                 AND ii.vat_classification_code IS NULL
                 AND i.vat_classification_code IS NULL
            ORDER BY i.varsymbol"
@@ -437,7 +458,7 @@ final class DphPriznaniBuilder
                     COALESCE(c.iso2, 'CZ') AS country_iso2,
                     s.ic, s.dic, s.is_vat_payer, s.is_identified,
                     s.taxpayer_type, s.vat_period, s.financial_office_code,
-                    s.workplace_code, s.cz_nace_code, s.data_box_type, s.data_box_id,
+                    s.workplace_code, s.cz_nace_code, s.data_box_id,
                     s.email, s.phone,
                     s.street_number_pop, s.street_number_orient,
                     s.opr_jmeno, s.opr_prijmeni, s.opr_postaveni,

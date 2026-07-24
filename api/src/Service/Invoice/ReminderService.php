@@ -24,6 +24,12 @@ use MyInvoice\Service\Validation\InvoiceAmountPolicy;
  */
 final class ReminderService
 {
+    /**
+     * Klient bez e-mailu je legitimní stav (#221) — cron to hlásí jako přeskočeno,
+     * ne jako chybu, jinak by u každého takového klienta šuměl v logu každý běh.
+     */
+    public const NO_RECIPIENT_MESSAGE = 'Klient nemá vyplněný email.';
+
     public function __construct(
         private readonly InvoiceRepository $repo,
         private readonly Connection $db,
@@ -77,7 +83,7 @@ final class ReminderService
         $to = $r['to'];
         $bcc = $r['bcc'];
         if (empty($to)) {
-            throw new \DomainException('Klient nemá vyplněný email.');
+            throw new \DomainException(self::NO_RECIPIENT_MESSAGE);
         }
 
         $cc = $r['cc'];

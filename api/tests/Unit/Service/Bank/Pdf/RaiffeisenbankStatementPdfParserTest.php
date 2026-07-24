@@ -142,6 +142,67 @@ final class RaiffeisenbankStatementPdfParserTest extends TestCase
         self::assertSame(100.0, $rowsOut[0]['amount']);
     }
 
+    public function testForeignCardPaymentUsesCzkAmountNotRateOrOriginal(): void
+    {
+        // Kartová platba v cizí měně: pod CZK částkou je původní částka v USD a kurz
+        // „CZK/USD". Účetní hodnota je jen CZK částka — původní částku ani kurz nezapočítat
+        // (regrese #205: parser bral poslední .dd, tj. kurz 21.83, místo -132.29 CZK).
+        $rows = "9. 6. 2026\n7. 6. 2026\n9076437020\n"
+              . "Platba kartou\n"
+              . "Anonymizováno\n"
+              . "Platba kartou\n"
+              . "KS:1178\n"
+              . "PK: 516872XXXXXX7989\n"
+              . "6,06 USD;OPENAI; SAN FRANCISCO; USA\n"
+              . "1178\t-132.29 CZK\n"
+              . "-6.06 USD\n"
+              . "21.83 CZK/USD\n";
+        $text = $this->statement('10 000.00', '9 867.71', '0.00', '132.29', $rows);
+
+        $rowsOut = $this->parser()->parseTransactionsFromText($text);
+        self::assertCount(1, $rowsOut);
+        self::assertSame(-132.29, $rowsOut[0]['amount']);
+        self::assertSame('1178', $rowsOut[0]['constant_symbol']);
+        // Kurz „21.83 CZK/USD" ani „-6.06 USD" se nesmí objevit v popisu; merchant ano.
+        self::assertStringNotContainsString('CZK/USD', (string) $rowsOut[0]['description']);
+        self::assertStringNotContainsString('21.83', (string) $rowsOut[0]['description']);
+        self::assertStringContainsString('OPENAI', (string) $rowsOut[0]['description']);
+
+        // A self-check projde (součet -132.29 = pohyb zůstatku).
+        $result = $this->parser()->parse('%PDF-fake', $text);
+        self::assertSame(-132.29, $result['transactions'][0]['amount']);
+    }
+
+    public function testForeignCardPaymentWithThreeDecimalRate(): void
+    {
+        // Kartová platba v cizí měně, kde kurz má TŘI desetinná místa („21.716 CZK/USD").
+        // Detekce řádku kurzu nesmí být vázaná na 2 desetinná místa, jinak parser vezme
+        // číselný prefix kurzu jako částku (regrese #205 follow-up: součet nesedí o kurz).
+        $rows = "9. 5. 2026\n7. 5. 2026\n9076437021\n"
+              . "Platba kartou\n"
+              . "Anonymizováno\n"
+              . "Platba kartou\n"
+              . "KS:1178\n"
+              . "PK: 516872XXXXXX7989\n"
+              . "6,06 USD;OPENAI; SAN FRANCISCO; USA\n"
+              . "1178\t-131.60 CZK\n"
+              . "-6.06 USD\n"
+              . "21.716 CZK/USD\n";
+        $text = $this->statement('10 000.00', '9 868.40', '0.00', '131.60', $rows);
+
+        $rowsOut = $this->parser()->parseTransactionsFromText($text);
+        self::assertCount(1, $rowsOut);
+        self::assertSame(-131.60, $rowsOut[0]['amount']);
+        // Kurz „21.716 CZK/USD" (ani jeho prefix 21.71) se nesmí objevit v popisu.
+        self::assertStringNotContainsString('CZK/USD', (string) $rowsOut[0]['description']);
+        self::assertStringNotContainsString('21.71', (string) $rowsOut[0]['description']);
+        self::assertStringContainsString('OPENAI', (string) $rowsOut[0]['description']);
+
+        // A self-check projde (součet -131.60 = pohyb zůstatku).
+        $result = $this->parser()->parse('%PDF-fake', $text);
+        self::assertSame(-131.60, $result['transactions'][0]['amount']);
+    }
+
     public function testEmptyMonthWithZeroTransactionsIsValid(): void
     {
         $result = $this->parser()->parse('%PDF-fake', $this->statement('500.00', '500.00', '0.00', '0.00', ''));

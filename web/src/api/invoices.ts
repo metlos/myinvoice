@@ -28,10 +28,30 @@ export interface InvoicePayment {
 
 export interface InvoicePaymentsResponse {
   payments: InvoicePayment[]
+  bank_transactions: RelatedBankTransaction[]
   paid_total: number
   amount_to_pay: number
   remaining: number
   payment_status: PaymentStatus | null
+}
+
+/** Bankovní operace přímo spárovaná s fakturou, i když nevytvořila účetní platbu. */
+export interface RelatedBankTransaction {
+  id: number
+  statement_id: number
+  statement_source: 'gpc' | 'pdf' | 'email_notice' | 'idoklad'
+  posted_at: string
+  amount: number
+  currency: string | null
+  variable_symbol: string | null
+  constant_symbol: string | null
+  specific_symbol: string | null
+  counterparty_account: string | null
+  counterparty_bank: string | null
+  counterparty_name: string | null
+  description: string | null
+  bank_ref: string | null
+  match_status: 'unmatched' | 'auto_exact' | 'auto_partial' | 'manual' | 'ignored'
 }
 
 /** Nespárovaná zálohová faktura (proforma) nabídnutá k propojení s daňovým dokladem. */
@@ -65,6 +85,15 @@ export interface InvoiceItem {
   vat_code?: string
   vat_label_cs?: string
   vat_label_en?: string
+  oss_applicable?: boolean
+  oss_consumer_country?: string | null
+  oss_rate_type?: 'standard' | 'reduced' | 'second_reduced' | 'parking' | 'zero' | string | null
+  oss_supply_type?: 'goods' | 'services' | null
+  oss_exchange_rate?: number | null
+  oss_exchange_rate_date?: string | null
+  oss_taxable_amount_return?: number | null
+  oss_vat_amount_return?: number | null
+  oss_original_period?: string | null
 }
 
 export interface VatBreakdownRow {
@@ -142,6 +171,10 @@ export interface Invoice {
   approval_reminder_at: string | null
   approval_reminder_count: number
   project_requires_approval?: boolean
+  /** Token trvalého veřejného odkazu „web faktura" (/invoice/{token}); null dokud odkaz nevznikl. */
+  public_token: string | null
+  /** Poslední zobrazení web faktury klientem (anonymní přístup); null = zatím nezobrazeno. */
+  public_viewed_at: string | null
   sent_at: string | null
   last_reminder_at: string | null
   reminder_count: number
@@ -294,6 +327,15 @@ export interface InvoicePayload {
     unit_price_without_vat: number
     vat_rate_id: number
     order_index: number
+    oss_applicable?: boolean
+    oss_consumer_country?: string | null
+    oss_rate_type?: string | null
+    oss_supply_type?: 'goods' | 'services' | null
+    oss_exchange_rate?: number | null
+    oss_exchange_rate_date?: string | null
+    oss_taxable_amount_return?: number | null
+    oss_vat_amount_return?: number | null
+    oss_original_period?: string | null
   }>
 }
 
@@ -384,6 +426,15 @@ export const invoicesApi = {
     if (filters.currency)   params.set('filter[currency]',   filters.currency)
     return api.get<Blob>('/invoices/export.csv', { params, responseType: 'blob' })
   },
+
+  exportSelectedPdf: (ids: number[], signPdf = false) =>
+    api.get<Blob>('/invoices/export.pdf', {
+      params: {
+        ids: ids.join(','),
+        ...(signPdf ? { sign_pdf: 1 } : {}),
+      },
+      responseType: 'blob',
+    }),
 
   get:    (id: number) => api.get<Invoice>(`/invoices/${id}`).then(r => r.data),
   /**
@@ -568,6 +619,19 @@ export const invoicesApi = {
   requestApprovalTest: (id: number) =>
     api.post<{ sent_to: string[]; sent_at: string; is_test: true }>(
       `/invoices/${id}/request-approval-test`,
+      {},
+    ).then(r => r.data),
+
+  // Web faktura — trvalý veřejný odkaz (ensure = idempotentní vytvoření + URL)
+  publicLink: (id: number) =>
+    api.post<{ url: string; token: string; public_viewed_at: string | null }>(
+      `/invoices/${id}/public-link`,
+      {},
+    ).then(r => r.data),
+
+  regeneratePublicLink: (id: number) =>
+    api.post<{ url: string; token: string; public_viewed_at: null }>(
+      `/invoices/${id}/public-link/regenerate`,
       {},
     ).then(r => r.data),
 

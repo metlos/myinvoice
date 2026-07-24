@@ -57,7 +57,9 @@ V každé skupině jsou faktury seřazené podle data vystavení (nejnovější 
 
 ## 9.3 Hromadné akce
 
-Zaškrtni více faktur (checkbox). Nahoře se objeví lišta s akcemi:
+Zaškrtni více faktur (checkbox). Checkbox v záhlaví prvního sloupce označí
+nebo odznačí všechny načtené faktury v daném měsíci. Nahoře se objeví
+lišta s akcemi:
 
 | Akce | Funkce | Aplikuje se na |
 |---|---|---|
@@ -65,13 +67,23 @@ Zaškrtni více faktur (checkbox). Nahoře se objeví lišta s akcemi:
 | **Odeslat klientovi (N)** | Hromadně odešle e-mail s PDF přílohou | Vystavené, neodeslané (`issued`) |
 | **Označit zaplacené (N)** | Manuálně označí jako zaplacené dnešním datem | Vystavené / odeslané / upomínkované |
 | **Upomínka (N)** | Pošle upomínkový e-mail | Po splatnosti, ne zaplacené, cooldown 14 dní mezi upomínkami |
-| **Stáhnout PDF ZIP** | ZIP archiv všech vybraných PDF | Vystavené (status ≥ `issued`) |
-| **Stáhnout ISDOC ZIP** | ISDOC 6.0.2 XML pro každou + ZIP | Vystavené |
-| **Stáhnout Pohoda XML** | Sloučený dataPack pro import do Pohody | Vystavené |
+| **PDF export (N)** | Spojí označené doklady do jednoho PDF; volitelně podepíše výsledný soubor | Vystavené, nejvýše 100 |
+
+ISDOC ZIP, Pohoda XML a PDF ZIP se nedělají výběrem v seznamu, ale za celé
+období na stránce **Daně → Hromadný export** — viz [15. Exporty](15_Exporty.md).
 
 > ⚠️ **Vystavit znovu** vždy vytvoří **nové koncepty** — nepřevede automaticky
 > klony do `issued`. Tím tě chrání před omylem; po klonování si v každé nové
 > projdi a klikni „Vystavit" ručně.
+
+U akce **PDF export (N)** se otevře dialog s volbou elektronického podpisu.
+Výsledný soubor obsahuje jen vlastní faktury v pořadí seznamu; e-mailové přílohy,
+vložené ISDOC soubory a výkazy práce se nepřidávají. Podpis se případně vytvoří
+až nad celým sloučeným PDF.
+
+Exportovat lze pouze vystavené doklady. Pokud je ve výběru koncept nebo stornovaný
+doklad, export se zastaví a vypíše, které doklady je potřeba z výběru vyřadit —
+koncept ještě nemá přidělené číslo, takže by do exportu vstoupil s placeholderem.
 
 ### 9.3.1 Workflow měsíční retainer
 

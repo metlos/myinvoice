@@ -27,10 +27,10 @@ Závisí na stavu faktury:
 
 | Stav | Dostupné akce |
 |---|---|
-| `issued` | Stáhnout PDF, Odeslat e-mailem, Označit zaplacené, Částečná úhrada, Storno, Dobropis, Test odeslání, Test upomínky, **Editovat (force)** |
-| `sent` | Stáhnout PDF, Odeslat znovu, Označit zaplacené, Částečná úhrada, Upomínka, Dobropis |
-| `reminded` | Stáhnout PDF, Další upomínka (cooldown 14 dní), Označit zaplacené, Částečná úhrada |
-| `paid` | Stáhnout PDF, Dobropis (vrátit peníze) |
+| `issued` | Stáhnout PDF, Odeslat e-mailem, Web faktura, Označit zaplacené, Částečná úhrada, Storno, Dobropis, Test odeslání, Test upomínky, **Editovat (force)** |
+| `sent` | Stáhnout PDF, Odeslat znovu, Web faktura, Označit zaplacené, Částečná úhrada, Upomínka, Dobropis |
+| `reminded` | Stáhnout PDF, Další upomínka (cooldown 14 dní), Web faktura, Označit zaplacené, Částečná úhrada |
+| `paid` | Stáhnout PDF, Web faktura, Dobropis (vrátit peníze) |
 
 > 💡 **Test odeslání / Test upomínky** — pošle e-mail jen na **tvůj** e-mail
 > (ne klientovi). Užitečné pro vyzkoušení šablony nebo SMTP konfigurace.
@@ -53,6 +53,14 @@ Platbu lze smazat (✕) — pokud tím doklad přestane být pokrytý, vrátí s
 stavu *Zaplaceno* mezi pohledávky. Platba navázaná na bankovní transakci se
 maže přes **Zrušit spárování** v detailu výpisu; platba s vystaveným daňovým
 dokladem až po jeho smazání/stornu.
+
+U faktur importovaných z externího systému může být doklad označen jako uhrazený
+ještě před importem bankovních dat. Pokud se později bankovní operace přímo spáruje
+s fakturou, detail zobrazí samostatný box **Související bankovní operace**. Obsahuje
+původní údaje z banky (datum, částku, účet a název protistrany, VS/KS/SS, popis a
+odkaz na výpis). Jde o dohledatelnou vazbu; bez samostatně evidované platby se tato
+operace znovu nezapočítává do uhrazené částky. Při nalezení stejné operace v GPC/PDF
+výpisu se odkaz přesune na tento autoritativní bankovní zdroj.
 
 Stav úhrady ukazuje badge: **Částečně uhrazeno** (přijata část peněz, zbytek
 se dál upomíná a počítá do pohledávek) a **Přeplaceno** (přišlo víc než
@@ -199,7 +207,7 @@ Per dodavatel lze nastavit:
 - **Reply-To** — kam má klient odpovědět (např. `fakturace@mywebdesign.cz` ≠
   technická adresa, ze které jde SMTP)
 
-Nastavuje se v **Systém → Dodavatelé → [tvůj dodavatel] → Editovat**.
+Nastavuje se v **Systém → Číselníky → Dodavatelé → [tvůj dodavatel] → Editovat**.
 
 ### 11.4.4 Volitelné přílohy emailu
 
@@ -232,7 +240,38 @@ běžném e-mailovém klientovi.
 
 Detail nastavení je v [kapitole 28. Elektronické podpisy](38_Elektronicke_podpisy.md).
 
-## 11.5 Historie PDF
+## 11.5 Web faktura (trvalý veřejný odkaz)
+
+Každá **vystavená** faktura (i proforma či dobropis) může mít trvalý veřejný
+odkaz ve tvaru `https://vase-domena/invoice/{token}` — klient si na něm fakturu
+**bez přihlášení** prohlédne v prohlížeči a stáhne PDF. Obdoba „web faktury"
+z Fakturoidu.
+
+- **Otevření** — v detailu faktury tlačítko **Web faktura**. První použití
+  odkaz vytvoří (token se generuje lazy), další otevření vrací tentýž odkaz.
+- **Kopírovat / Otevřít** — v modalu lze odkaz zkopírovat do schránky nebo
+  rovnou otevřít v novém panelu.
+- **E-mail klientovi** — odkaz se automaticky vkládá do e-mailu při akci
+  **Odeslat e-mailem** (tlačítko „Zobrazit fakturu online" + textový odkaz).
+- **Zobrazeno klientem** — první anonymní návštěva stránky se zapíše; v detailu
+  faktury se pak ukazuje badge **👁 Zobrazeno klientem** (datum posledního
+  zobrazení je v modalu Web faktury a v historii akcí, včetně stažení PDF).
+  Náhled přihlášeného uživatele indikaci neovlivní.
+- **Vygenerovat nový odkaz** — revokace: stávající URL okamžitě přestane
+  platit (hodí se při úniku odkazu nesprávnému příjemci). Nový odkaz se pak
+  posílá i v dalších e-mailech.
+
+Veřejná stránka zobrazuje jen to, co je na PDF faktury: dodavatele, odběratele,
+položky, součty s rozpadem DPH, platební údaje s QR kódem a poznámky z dokladu.
+Klient si stáhne i **přílohy e-mailu** nahrané k faktuře (smlouva, výkaz…).
+Stav úhrady se ukazuje živě (Uhrazeno / Částečně uhrazeno / Po splatnosti).
+Koncepty veřejný odkaz nemají — stránka je dostupná až po vystavení dokladu.
+
+> 🔒 Odkaz obsahuje 48znakový náhodný token — nelze ho uhodnout ani odvodit.
+> Kdo odkaz má, fakturu vidí; pokud se dostal do nesprávných rukou, vygenerujte
+> nový odkaz (starý tím zneplatníte).
+
+## 11.6 Historie PDF
 
 V detailu faktury je sekce **Historie PDF** — seznam všech archivovaných
 verzí PDF, které tato faktura kdy měla:
@@ -259,12 +298,12 @@ U odeslaných verzí navíc vidíš **kam to šlo** (seznam příjemců).
 > Pokud potřebuješ ušetřit místo, použij ruční smazání jen u
 > neodeslaných invalidačních verzí (zatím není UI; přes SQL).
 
-## 11.6 Admin akce nad vystavenou fakturou
+## 11.7 Admin akce nad vystavenou fakturou
 
 Sekce **Další akce** v detailu faktury skrývá několik nástrojů, které jsou
 přístupné jen adminovi a používají se v krajních případech.
 
-### 11.6.1 Editace vystavené faktury (force=1)
+### 11.7.1 Editace vystavené faktury (force=1)
 
 V krajní nouzi (admin udělal v vystavené faktuře překlep, klient ji ještě
 nedostal):
@@ -281,7 +320,7 @@ nedostal):
 > 🛈 **Var. symbol je immutable** — force-edit ho NEzmění. Pokud chceš číslo
 > změnit, vystav storno/dobropis a fakturu znovu pod novým číslem.
 
-### 11.6.2 Nezaplacené (vrátit ze stavu paid)
+### 11.7.2 Nezaplacené (vrátit ze stavu paid)
 
 Tlačítko **Nezaplacené** je viditelné jen u faktur ve stavu `paid` (admin only).
 Vrátí fakturu ze stavu zaplacené zpět do `sent` (pokud byla odeslaná) nebo
@@ -301,7 +340,7 @@ Použití:
 
 Activity log: `invoice.unmark_paid` s `previous_paid_at` pro forenzní stopu.
 
-### 11.6.3 Smazání vystavené faktury (force-delete, admin)
+### 11.7.3 Smazání vystavené faktury (force-delete, admin)
 
 Force-delete je 3. možnost ve **Storno / Dobropis** modalu (otevřeš tlačítkem
 „Storno / Dobropis" v detailu vystavené faktury). Volby v modalu:
@@ -338,7 +377,7 @@ alternativou (storno / dobropis / Nezaplacené).
 > 💡 **Typický legální use case:** vystavil jsi fakturu omylem (jiný klient,
 > špatná částka) a klient ji ještě nedostal. Pokud už dostal, vystav dobropis.
 
-## 11.7 Změna bankovního účtu po vystavení
+## 11.8 Změna bankovního účtu po vystavení
 
 Pokud změníš bankovní účet v **Systém → Číselníky → Měny**, automaticky se
 **invalidují PDF všech faktur**, které renderují bank info live (drafty +
@@ -348,7 +387,7 @@ už dostal).
 
 V activity logu uvidíš `currency.updated` s počtem invalidovaných PDF.
 
-## 11.8 Tipy
+## 11.9 Tipy
 
 - **PDF náhled v iframe na detailu** se neobnoví automaticky po editaci —
   refreshni stránku (F5).

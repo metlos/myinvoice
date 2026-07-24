@@ -56,14 +56,13 @@ const daysToDeadline = computed(() => {
   return Math.ceil((d.getTime() - today.getTime()) / (1000 * 60 * 60 * 24))
 })
 
-function shTypeLabel(t: string): string {
-  switch (t) {
-    case '0': return 'Dodání zboží do EU'
-    case '1': return 'Trojstranný obchod (prostředník)'
-    case '2': return 'Poskytnutí služby do EU'
-    case '3': return 'Přemístění zboží'
-    default:  return t
-  }
+// Popisky typů plnění (k_pln_eu) dle DPHSHV XSD — pořadí MUSÍ sedět s backendem
+// (SouhrnneHlaseniBuilder::VAT_CODE_TO_SH_TYPE): 0=zboží, 1=přemístění majetku,
+// 2=třístranný obchod, 3=služby. Dřív byly 1/2/3 posunuté (issue #238).
+function shTypeLabel(code: string): string {
+  const key = `reports.shv.sh_type.${code}`
+  const label = t(key)
+  return label === key ? code : label
 }
 
 watch([year, month, effectivePeriod], loadPreview)

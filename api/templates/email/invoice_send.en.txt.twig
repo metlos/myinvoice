@@ -22,6 +22,9 @@ Due date:        {{ invoice.due_date|date('M j, Y') }}
 {% elseif payment_method == 'cash' %}>>> Cash payment.
 
 {% endif %}The invoice PDF is attached.
+{% if public_url %}
+You can view the invoice online anytime: {{ public_url }}
+{% endif %}
 
 {% if not is_test %}Thank you for your business.
 {% else %}=== TEST EMAIL — client did not receive it. ==={% endif %}

@@ -22,7 +22,7 @@ faktury — ne pravidelná šablona.
 
 ## 12.2 Vytvoření šablony
 
-V menu **Systém → Pravidelné fakturace** klikni **+ Nová šablona**, nebo
+V menu **Prodej → Pravidelné fakturace** klikni **+ Nová šablona**, nebo
 v detailu existující faktury tlačítko **Vytvořit šablonu z této faktury**
 (předvyplní klienta, položky, měnu, jazyk i payment method).
 
@@ -86,6 +86,24 @@ faktuře propíše jako konkrétní rozsah měsíce.
 
 Položky šablony se 1:1 kopírují na každou vygenerovanou fakturu (popis, mn.,
 cena/j, sazba DPH). Sazba se bere podle vybraného `vat_rate_id` ze šablony.
+
+Řádek může být zadaný ručně nebo napojený na **ceníkovou položku**. U napojené
+položky zvolíš také zdroj popisu a cenovou politiku:
+
+| Politika | Chování |
+|---|---|
+| **Pevná cena ze šablony** | Při výběru se uloží cena, jednotka, DPH a případný kurz. Pozdější změna ceníku ani zákaznické ceny šablonu nepřecení. |
+| **Vždy aktuální cena** | Při každém generování se znovu použije aktuální zákaznická nebo obecná cena. Chybějící měna se při povoleném přepočtu vypočte kurzem k DUZP, u proformy k datu vystavení. |
+| **Při změně vyžadovat kontrolu** | Změna zdrojové ceny, jednotky, DPH nebo zdroje ceny zastaví generování. V editoru použij **Převzít aktuální údaje**. Samotný pohyb kurzu kontrolu nevyžaduje. |
+
+Volba **Popis z ceníku** přebírá aktuální ceníkový popis podle zvolené politiky.
+Volba **Vlastní popis šablony** dovolí text upravit nezávisle. Placeholdery
+období fungují v obou případech až při vytvoření konkrétní faktury.
+
+Archivovaná položka může dál sloužit pevnému snapshotu. Politiky používající
+aktuální údaje skončí s chybou, dokud položku neobnovíš, nenahradíš nebo
+nepřevedeš na ruční položku. Změnu měny nebo režimu s/bez DPH nelze u pevného
+snapshotu uložit bez jeho výslovného obnovení.
 
 > ⚠️ **Změna sazby DPH státem** — sazba je v šabloně přišpendlená na konkrétní
 > řádek číselníku. Když se sazba změní (např. 21 % → 22 %), vznikne v `vat_rates`

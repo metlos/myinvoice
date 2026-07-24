@@ -1,7 +1,7 @@
 # MyInvoice.cz — Apache configuration
 #
 # /api/*        → api/public/index.php (Slim FrontController)
-# statika       → /styles/, /assets/ napřímo
+# statika       → /styles/, /assets/ a PWA soubory napřímo
 # SPA fallback  → web/dist/index.html
 
 Options -Indexes -MultiViews
@@ -36,7 +36,13 @@ Options -Indexes -MultiViews
     RewriteCond %{REQUEST_URI} ^/assets/
     RewriteRule ^assets/(.*)$ web/dist/assets/$1 [L]
 
-    # 3b) /manual a /manual?ch=... → manual/index.php (HTML manuál)
+    # 3b) PWA soubory generované Vitem → web/dist. Service worker musí být
+    # dostupný z rootu, aby mohl ovládat celou aplikaci (scope `/`).
+    RewriteRule ^service-worker\.js$ web/dist/service-worker.js [E=NOCACHE:1,L]
+    RewriteRule ^manifest\.webmanifest$ web/dist/manifest.webmanifest [E=NOCACHE:1,L]
+    RewriteRule ^pwa/(.*)$ web/dist/pwa/$1 [L]
+
+    # 3c) /manual a /manual?ch=... → manual/index.php (HTML manuál)
     # Statické soubory v /manual/generated/img/ a /manual/generated/search-index.json
     # se servírují přímo (mají reálné soubory). /manual/img/ (zdroj WEBP) je taky v
     # docroot a serveruje se přímo. Jen "pretty" /manual URL jde přes index.php.
@@ -94,10 +100,10 @@ Options -Indexes -MultiViews
     </IfModule>
 </FilesMatch>
 
-# API responses nesmí být cache-ované.
+# API odpovědi ani PWA řídicí soubory nesmí být cache-ované.
 # `<LocationMatch>` není povolený v .htaccess (jen ve server/vhost configu),
-# takže používáme rewrite-env trick: nastavíme proměnnou NOCACHE pro /api/* a
-# Header Cache-Control podle ní pošleme. Funguje napříč Apache + IIS + Docker.
+# takže používáme rewrite-env trick: nastavíme proměnnou NOCACHE pro /api/*
+# a PWA soubory a Header Cache-Control podle ní pošleme.
 <IfModule mod_rewrite.c>
     RewriteCond %{REQUEST_URI} ^/api/
     RewriteRule ^ - [E=NOCACHE:1]
@@ -129,6 +135,7 @@ Options -Indexes -MultiViews
     AddType font/woff2 .woff2
     AddType font/woff  .woff
     AddType image/svg+xml .svg
+    AddType application/manifest+json .webmanifest
     # OpenAPI spec — Apache by jinak vrátil .yaml jako application/octet-stream
     # (= browser stáhne místo zobrazení). Swagger UI / Redoc fetchne přes /api/openapi.yaml.
     AddType application/yaml .yaml

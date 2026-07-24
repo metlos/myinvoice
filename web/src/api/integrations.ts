@@ -38,6 +38,8 @@ export interface ImportJob {
 }
 
 export interface IdokladStartParams {
+  include_bank_accounts?: boolean
+  include_bank_transactions?: boolean
   include_clients?: boolean
   include_issued?: boolean
   include_received?: boolean
@@ -102,7 +104,13 @@ export interface AiExtractResult {
   ok: boolean
   purchase_invoice_id?: number
   vendor_id?: number
-  source: 'isdoc_embedded' | 'ai' | 'ai_failed' | 'ai_invalid' | 'wrong_tenant' | 'no_vendor' | 'create_failed'
+  vendor_name?: string
+  document_kind?: 'invoice' | 'receipt' | 'credit_note' | 'advance'
+  total_with_vat?: number | null
+  currency?: string
+  source: 'isdoc_embedded' | 'isdocx' | 'duplicate' | 'ai' | 'ai_failed' | 'ai_invalid' | 'wrong_tenant' | 'no_vendor' | 'create_failed'
+  duplicate?: boolean
+  message?: string
   model?: string
   usage?: { input_tokens?: number; output_tokens?: number }
   ai_data?: Record<string, unknown>
@@ -145,10 +153,13 @@ export const integrationsApi = {
     }).then(r => r.data),
   deleteAnthropicCreds: () =>
     api.delete<{ ok: boolean }>('/admin/imports/anthropic/credentials').then(r => r.data),
-  extractPdfAi: (file: File, model?: string) => {
+  extractPdfAi: (file: File, model?: string, importBatchId?: string) => {
     const fd = new FormData()
     fd.append('pdf', file, file.name)
-    const url = model ? `/admin/imports/ai-extract-pdf?model=${model}` : '/admin/imports/ai-extract-pdf'
+    const qs = new URLSearchParams()
+    if (model) qs.set('model', model)
+    if (importBatchId) qs.set('import_batch_id', importBatchId)
+    const url = qs.toString() ? `/admin/imports/ai-extract-pdf?${qs.toString()}` : '/admin/imports/ai-extract-pdf'
     return api.post<AiExtractResult>(url, fd, {
       headers: { 'Content-Type': 'multipart/form-data' },
       timeout: 120000, // 2 min — AI inference může trvat

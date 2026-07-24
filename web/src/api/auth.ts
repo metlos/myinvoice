@@ -18,6 +18,8 @@ export interface SupplierBrief {
   /** Identifikovaná osoba (§ 6g–6l ZDPH, issue #94) — neplátce v tuzemsku
    *  s přeshraničními povinnostmi (RC faktury do EU, SHV, samovyměření). */
   is_identified: boolean
+  /** Dodavatel je registrovaný v režimu One Stop Shop. */
+  oss_enabled: boolean
   /** 'fo' = OSVČ (fyzická osoba), 'po' = s.r.o. (právnická osoba), null = nenastaveno. */
   taxpayer_type: 'fo' | 'po' | null
   default_payment_due_days: number

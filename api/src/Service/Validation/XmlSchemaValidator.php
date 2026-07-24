@@ -9,23 +9,9 @@ use MyInvoice\Bootstrap;
 /**
  * XSD validation pro EPO XML výkazy MFČR.
  *
- * **Strategie:** XSD schémata MFČR jsou veřejně dostupné na adisspr.mfcr.cz, ale
- * vyžadují stažení (různé verze, ~10 souborů). Aplikace operuje "offline" — pokud
- * je schema přítomen v `storage/xsd/{form_code}.xsd`, validujeme. Jinak `skipped`.
- *
- * Setup (volitelný — pro plnou compliance):
- *   1. Stáhni XSD soubory z https://adisspr.mfcr.cz/dpr/adis/idpr_pub/dpr_info/xsd.faces
- *   2. Uložit do `storage/xsd/`:
- *        - dphdp3.xsd  (DPH přiznání DPHDP3)
- *        - dphkh1.xsd  (Kontrolní hlášení DPHKH1)
- *        - dphshv.xsd  (Souhrnné hlášení DPHSHV)
- *        - dpfdp5.xsd  (Daň z příjmů FO)
- *        - dppdp9.xsd  (Daň z příjmů PO)
- *
- * Bez schématu validation vrátí `status=skipped` — XML se stále archivuje a stahuje
- * normálně, jen UI nevarujem před chybami.
- *
- * **Pozn.:** Schémata nezahrnujeme do repo kvůli velikosti a licenci MFČR.
+ * Schémata jsou součástí `api/xsd/`, takže validace funguje offline. Pokud pro
+ * některý form_code schéma chybí, vrátí se `status=skipped`; XML se i tak
+ * archivuje a stáhne.
  */
 final class XmlSchemaValidator
 {
@@ -90,6 +76,7 @@ final class XmlSchemaValidator
         'dphdp3' => 'dphdp3.xsd',
         'dphkh1' => 'dphkh1.xsd',
         'dphshv' => 'dphshv.xsd',
+        'ossei1' => 'ossei1.xsd',
         'dpfdp5' => 'dpfdp5.xsd',
         'dppdp9' => 'dppdp9.xsd',
         'isdoc'  => 'isdoc-invoice-6.0.2.xsd',

@@ -30,6 +30,7 @@ final class IsdocExporter
 {
     public const NS = 'http://isdoc.cz/namespace/2013';
     public const VERSION = '6.0.2';
+    public const MYINVOICE_EXTENSION_NS = 'https://myinvoice.cz/isdoc/extensions/2026';
 
     /**
      * Mapa nejčastějších CZ bankovních kódů → BIC (SWIFT). Používá se jako fallback
@@ -183,7 +184,11 @@ final class IsdocExporter
             default        => 1,  // faktura — daňový doklad
         };
         $this->el($dom, $root, 'DocumentType', (string) $docType);
-        $this->el($dom, $root, 'ID', (string) ($invoice['varsymbol'] ?? ('DRAFT-' . $invoice['id'])));
+        $documentNumber = trim((string) ($invoice['document_number'] ?? ''));
+        if ($documentNumber === '') {
+            $documentNumber = (string) ($invoice['varsymbol'] ?? ('DRAFT-' . $invoice['id']));
+        }
+        $this->el($dom, $root, 'ID', $documentNumber);
         $this->el($dom, $root, 'UUID', $this->makeUuid($invoice));
         // IssuingSystem patří v root sekvenci před IssueDate (po EgovClassifiers).
         // Identifikuje generátor faktury — užitečné pro debugging accounting SW.
@@ -214,6 +219,23 @@ final class IsdocExporter
         // CurrRate = počet jednotek místní měny za 1 jednotku faktur. měny (CZK/EUR ≈ 24.36)
         $this->el($dom, $root, 'CurrRate', number_format($rate, 6, '.', ''));
         $this->el($dom, $root, 'RefCurrRate', '1');
+
+        $internalDocumentNumber = trim((string) ($invoice['internal_document_number'] ?? ''));
+        if ($internalDocumentNumber !== '') {
+            $root->setAttributeNS(
+                'http://www.w3.org/2000/xmlns/',
+                'xmlns:myi',
+                self::MYINVOICE_EXTENSION_NS,
+            );
+            $extensions = $dom->createElementNS(self::NS, 'Extensions');
+            $internalNumber = $dom->createElementNS(
+                self::MYINVOICE_EXTENSION_NS,
+                'myi:InternalDocumentNumber',
+            );
+            $internalNumber->appendChild($dom->createTextNode($internalDocumentNumber));
+            $extensions->appendChild($internalNumber);
+            $root->appendChild($extensions);
+        }
 
         // Supplier (snapshot first, then live) — $supplier už vyřešen výše u VATApplicable
         $supParty = $dom->createElementNS(self::NS, 'AccountingSupplierParty');
@@ -378,7 +400,11 @@ final class IsdocExporter
         // (ID, BankCode, Name, IBAN, BIC — všech 5 elementů REQUIRED v schema, posíláme
         // prázdné jako fallback), pak volitelně VariableSymbol/ConstantSymbol/SpecificSymbol.
         $bank = $this->resolveBank($invoice);
-        if ($bank !== null && $payable > 0) {
+        $explicitPaymentVariableSymbol = trim((string) ($invoice['payment_variable_symbol'] ?? ''));
+        $paymentVariableSymbol = $explicitPaymentVariableSymbol !== ''
+            ? $explicitPaymentVariableSymbol
+            : trim((string) ($invoice['varsymbol'] ?? ''));
+        if ($bank !== null && ($payable > 0 || $explicitPaymentVariableSymbol !== '')) {
             $pm = $dom->createElementNS(self::NS, 'PaymentMeans');
             $payment = $dom->createElementNS(self::NS, 'Payment');
             // PaidAmount nemá v ISDOC Curr variantu → lokální měna (CZK).
@@ -407,10 +433,13 @@ final class IsdocExporter
             $this->el($dom, $details, 'Name', (string) ($bank['bank_name'] ?? ''));
             $this->el($dom, $details, 'IBAN', $iban);
             $this->el($dom, $details, 'BIC', $bic);
-            if (!empty($invoice['varsymbol'])) {
-                $this->el($dom, $details, 'VariableSymbol', (string) $invoice['varsymbol']);
+            if ($paymentVariableSymbol !== '') {
+                $this->el($dom, $details, 'VariableSymbol', $paymentVariableSymbol);
             }
-            $this->el($dom, $details, 'ConstantSymbol', '0308');
+            $constantSymbol = trim((string) ($invoice['payment_constant_symbol'] ?? '0308'));
+            if ($constantSymbol !== '') {
+                $this->el($dom, $details, 'ConstantSymbol', $constantSymbol);
+            }
 
             $payment->appendChild($details);
             $pm->appendChild($payment);

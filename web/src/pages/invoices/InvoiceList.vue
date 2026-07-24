@@ -65,6 +65,17 @@ const activeFilterCount = computed(() => {
 
 const selectedIds = ref<number[]>([])
 const bulkBusy = ref(false)
+const bulkPdfOpen = ref(false)
+const bulkPdfSign = ref(false)
+
+const selectedPdfIds = computed(() => {
+  const selected = new Set(selectedIds.value)
+  const visible = groups.value.flatMap(group => group.invoices)
+    .map(invoice => invoice.id)
+    .filter(id => selected.has(id))
+  const visibleSet = new Set(visible)
+  return [...visible, ...selectedIds.value.filter(id => !visibleSet.has(id))]
+})
 
 let searchTimeout: ReturnType<typeof setTimeout> | null = null
 
@@ -77,6 +88,73 @@ function toggleSelected(id: number) {
   const i = selectedIds.value.indexOf(id)
   if (i === -1) selectedIds.value.push(id)
   else selectedIds.value.splice(i, 1)
+}
+
+function isGroupSelected(group: MonthGroup): boolean {
+  return group.invoices.length > 0 && group.invoices.every(invoice => selectedIds.value.includes(invoice.id))
+}
+
+function isGroupSelectionPartial(group: MonthGroup): boolean {
+  const selectedCount = group.invoices.filter(invoice => selectedIds.value.includes(invoice.id)).length
+  return selectedCount > 0 && selectedCount < group.invoices.length
+}
+
+function toggleGroupSelected(group: MonthGroup) {
+  const groupIds = group.invoices.map(invoice => invoice.id)
+  const selected = new Set(selectedIds.value)
+
+  if (groupIds.every(id => selected.has(id))) {
+    selectedIds.value = selectedIds.value.filter(id => !groupIds.includes(id))
+    return
+  }
+
+  for (const id of groupIds) selected.add(id)
+  selectedIds.value = Array.from(selected)
+}
+
+function openBulkPdfExport() {
+  if (selectedPdfIds.value.length === 0) return
+  bulkPdfSign.value = false
+  bulkPdfOpen.value = true
+}
+
+async function responseErrorMessage(error: any, fallback: string): Promise<string> {
+  const data = error?.response?.data
+  if (data instanceof Blob) {
+    try {
+      const parsed = JSON.parse(await data.text())
+      return parsed?.error?.message || fallback
+    } catch {
+      return fallback
+    }
+  }
+  return data?.error?.message || fallback
+}
+
+async function bulkExportPdf() {
+  const ids = selectedPdfIds.value
+  if (ids.length === 0 || ids.length > 100) return
+  bulkBusy.value = true
+  try {
+    const response = await invoicesApi.exportSelectedPdf(ids, bulkPdfSign.value)
+    const disposition = response.headers['content-disposition'] || ''
+    const match = disposition.match(/filename="?([^";]+)"?/)
+    const filename = match?.[1] || `myinvoice-vybrane-faktury-${new Date().toISOString().slice(0, 10)}.pdf`
+    const url = URL.createObjectURL(response.data)
+    const link = document.createElement('a')
+    link.href = url
+    link.download = filename
+    document.body.appendChild(link)
+    link.click()
+    link.remove()
+    URL.revokeObjectURL(url)
+    bulkPdfOpen.value = false
+    toast.success(t('invoice.bulk_pdf_done', { n: ids.length }))
+  } catch (error: any) {
+    toast.error(await responseErrorMessage(error, t('invoice.bulk_pdf_failed') as string))
+  } finally {
+    bulkBusy.value = false
+  }
 }
 
 async function bulkReissue() {
@@ -486,6 +564,13 @@ const monthOptions = computed(() => (tm('common.months_short') as unknown as str
         <p class="text-sm text-neutral-500 mt-0.5">{{ t('invoice.subtitle_grouping') }}</p>
       </div>
       <div class="flex items-center gap-2">
+        <button v-if="selectedIds.length > 0"
+          @click="openBulkPdfExport"
+          :disabled="bulkBusy"
+          class="cursor-pointer inline-flex items-center gap-1.5 h-9 px-3 border border-primary-500 text-primary-700 hover:bg-primary-50 disabled:opacity-50 text-sm font-medium rounded-md">
+          <svg class="w-4 h-4" fill="none" viewBox="0 0 24 24" stroke="currentColor" stroke-width="2"><path stroke-linecap="round" stroke-linejoin="round" d="M12 16V4m0 12l-4-4m4 4l4-4M4 20h16"/></svg>
+          {{ t('invoice.bulk_pdf', { n: selectedIds.length }) }}
+        </button>
         <button v-if="(issuableSelected.length > 0) && auth.canWrite"
           @click="bulkIssue"
           :disabled="bulkBusy"
@@ -640,7 +725,17 @@ const monthOptions = computed(() => (tm('common.months_short') as unknown as str
           <table class="w-full text-sm table-sticky-first">
             <thead class="bg-neutral-50 text-neutral-500 text-xs uppercase tracking-wide">
               <tr>
-                <th class="px-2 py-2 w-10"></th>
+                <th class="px-2 py-2 w-10 text-center">
+                  <input
+                    type="checkbox"
+                    :checked="isGroupSelected(g)"
+                    :indeterminate="isGroupSelectionPartial(g)"
+                    @change="toggleGroupSelected(g)"
+                    :aria-label="t('invoice.select_month', { month: formatMonth(g.month) })"
+                    :title="t('invoice.select_month', { month: formatMonth(g.month) })"
+                    class="w-5 h-5 cursor-pointer rounded border-neutral-300 text-primary-600 focus:ring-2 focus:ring-primary-500/30"
+                  />
+                </th>
                 <th class="text-left px-4 py-2 font-medium w-32">Var. symbol</th>
                 <th class="text-left px-4 py-2 font-medium">{{ t('invoice.client_project') }}</th>
                 <th class="text-center px-4 py-2 font-medium">Typ</th>
@@ -785,6 +880,36 @@ const monthOptions = computed(() => (tm('common.months_short') as unknown as str
           {{ loadingMore ? t('common.loading_more') : t('common.load_more') }}
           <svg class="w-4 h-4" fill="none" viewBox="0 0 24 24" stroke="currentColor" stroke-width="2.5"><path stroke-linecap="round" stroke-linejoin="round" d="M19 14l-7 7m0 0l-7-7m7 7V3"/></svg>
         </button>
+      </div>
+    </div>
+
+    <div v-if="bulkPdfOpen" class="fixed inset-0 bg-black/40 z-50 flex items-center justify-center p-4" @click.self="bulkPdfOpen = false">
+      <div class="bg-surface rounded-lg shadow-xl w-full max-w-md p-5 space-y-4">
+        <div>
+          <h2 class="text-lg font-semibold">{{ t('invoice.bulk_pdf_title') }}</h2>
+          <p class="text-sm text-neutral-500 mt-1">{{ t('invoice.bulk_pdf_hint', { n: selectedPdfIds.length }) }}</p>
+        </div>
+        <label class="flex items-start gap-3 cursor-pointer rounded-md border border-neutral-200 bg-neutral-50 p-3">
+          <input v-model="bulkPdfSign" type="checkbox"
+            class="mt-0.5 w-4 h-4 rounded border-neutral-300 text-primary-600 focus:ring-primary-500" />
+          <span>
+            <span class="block text-sm font-medium text-neutral-800">{{ t('invoice.bulk_pdf_sign') }}</span>
+            <span class="block text-xs text-neutral-500 mt-0.5">{{ t('invoice.bulk_pdf_sign_hint') }}</span>
+          </span>
+        </label>
+        <p v-if="selectedPdfIds.length > 100" class="text-sm text-danger-500">
+          {{ t('invoice.bulk_pdf_limit') }}
+        </p>
+        <div class="flex justify-end gap-2 pt-1">
+          <button type="button" @click="bulkPdfOpen = false" :disabled="bulkBusy"
+            class="cursor-pointer h-9 px-4 text-sm border border-neutral-300 rounded-md hover:bg-neutral-50 disabled:opacity-50">
+            {{ t('common.cancel') }}
+          </button>
+          <button type="button" @click="bulkExportPdf" :disabled="bulkBusy || selectedPdfIds.length > 100"
+            class="cursor-pointer h-9 px-4 text-sm bg-primary-600 hover:bg-primary-700 text-white rounded-md disabled:opacity-50 inline-flex items-center gap-1.5">
+            {{ bulkBusy ? t('common.loading') : t('invoice.bulk_pdf_download') }}
+          </button>
+        </div>
       </div>
     </div>
 

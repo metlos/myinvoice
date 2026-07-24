@@ -90,6 +90,7 @@ const ICONS = {
   invoices:   'M9 12h6m-6 4h6m2 5H7a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h5.586a1 1 0 0 1 .707.293l5.414 5.414a1 1 0 0 1 .293.707V19a2 2 0 0 1-2 2z',
   proforma:   'M2.25 8.25h19.5M2.25 9v6.75A2.25 2.25 0 0 0 4.5 18h15a2.25 2.25 0 0 0 2.25-2.25V9A2.25 2.25 0 0 0 19.5 6.75h-15A2.25 2.25 0 0 0 2.25 9zM14 12a2 2 0 1 1-4 0 2 2 0 0 1 4 0z',
   recurring:  'M4 4v5h5M4 9a8 8 0 0 1 14.13-4.06M20 20v-5h-5M20 15a8 8 0 0 1-14.13 4.06',
+  price_list: 'M4 6h16M4 12h16M4 18h16M7 4v4M13 10v4M17 16v4',
   purchase:   'M3 3h2l.4 2M7 13h10l4-8H5.4M7 13L5.4 5M7 13l-2.293 2.293c-.63.63-.184 1.707.707 1.707H17m0 0a2 2 0 1 0 0 4 2 2 0 0 0 0-4zm-8 2a2 2 0 1 1-4 0 2 2 0 0 1 4 0z',
   bank:       'M3 9l9-7 9 7m-2 0v9a2 2 0 0 1-2 2H8a2 2 0 0 1-2-2V9m4 11V13h4v7',
   stats:      'M3 3v18h18M7 14l4-4 4 4 5-5',
@@ -130,6 +131,9 @@ const navSections = computed<NavSection[]>(() => {
   const isAdmin = auth.user?.role === 'admin'
   // Daňový optimalizátor (paušál vs standardní režim) je jen pro OSVČ (fyzická osoba).
   const isOsvc = supplierStore.currentSupplier?.taxpayer_type === 'fo'
+  // OSS se nabízí až po registraci do režimu (Nastavení → firma). Default je vypnuto,
+  // takže drtivá většina firem OSS v menu vůbec neuvidí.
+  const ossEnabled = supplierStore.currentSupplier?.oss_enabled === true
   const sections: NavSection[] = [
     { items: [{ to: '/', label: t('nav.dashboard'), icon: ICONS.dashboard }] },
     {
@@ -140,6 +144,7 @@ const navSections = computed<NavSection[]>(() => {
       items: [
         { to: '/invoices',         label: t('nav.invoices'),   icon: ICONS.invoices,  newTo: '/invoices/new' },
         { to: '/recurring',        label: t('nav.recurring'),  icon: ICONS.recurring, newTo: '/recurring/new' },
+        ...(isAdmin ? [{ to: '/admin/price-list', label: t('nav.price_list'), icon: ICONS.price_list }] : []),
         { to: '/clients',          label: t('nav.clients'),    icon: ICONS.clients,   newTo: '/clients/new' },
         { to: '/projects',         label: t('nav.projects'),   icon: ICONS.projects },
         ...(isAdmin ? [{ to: '/admin/approvals',          label: t('nav.approvals'),         icon: ICONS.approvals }] : []),
@@ -189,6 +194,7 @@ const navSections = computed<NavSection[]>(() => {
         { to: '/reports/shv',         label: t('nav.reports_shv'),         icon: ICONS.tax_shv },
         { to: '/reports/income-tax',  label: t('nav.reports_income_tax'),  icon: ICONS.tax_income },
         ...(isOsvc ? [{ to: '/tax', label: t('nav.tax_optimizer'), icon: ICONS.tax_optimizer }] : []),
+        ...(ossEnabled ? [{ to: '/reports/oss', label: t('nav.reports_oss'), icon: ICONS.tax_shv }] : []),
         { to: '/reports/submissions', label: t('nav.reports_submissions'), icon: ICONS.tax_archive },
         { to: '/reports/monthly-export', label: t('nav.reports_monthly_export'), icon: ICONS.exports },
       ],

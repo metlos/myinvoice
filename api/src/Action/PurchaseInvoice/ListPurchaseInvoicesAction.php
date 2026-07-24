@@ -43,6 +43,7 @@ final class ListPurchaseInvoicesAction
             'overdue'       => !empty($filter['overdue']),
             'needs_review'  => !empty($filter['needs_review']),
             'payment_ordered' => $filter['payment_ordered'] ?? null,
+            'import_batch_id' => $filter['import_batch_id'] ?? null,
             'supplier_id'   => (int) $request->getAttribute(SupplierScopeMiddleware::ATTR_CURRENT_ID, 0),
         ];
 

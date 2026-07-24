@@ -29,6 +29,16 @@ final class RaiffeisenbankStatementPdfParser implements BankStatementPdfParserIn
     /** Částka: volitelné znaménko, tisíce oddělené mezerou/NBSP, TEČKA desetinná. */
     private const AMOUNT = '-?\d{1,3}(?:[\x{00A0} ]\d{3})*\.\d{2}';
 
+    /**
+     * Řádek kurzu u kartové platby v cizí měně („21.83 CZK/USD", „21.716 CZK/USD") — poměr
+     * měn, NE částka transakce. Musí se z detekce částky i z popisu vyřadit, jinak by se
+     * hodnota kurzu vzala jako (chybná) CZK částka místo skutečné hodnoty ve sloupci Částka
+     * (issue #205). Kurz má PROMĚNLIVÝ počet desetinných míst (2 i 3+), proto vlastní číselný
+     * vzor `\.\d+` místo AMOUNT (`\.\d{2}`) — jinak by „21.716" propadlo jako částka „21.71".
+     */
+    private const FX_RATE = '-?\d{1,3}(?:[\x{00A0} ]\d{3})*\.\d+';
+    private const FX_RATE_LINE = '/^' . self::FX_RATE . '\s+[A-Z]{3}\/[A-Z]{3}$/u';
+
     /** Hlavičkové zůstatky/součty: číslo s mezerami tisíců a tečkou (bez povinného znaménka). */
     private const MONEY_H = '([\d\x{00A0} ]+\.\d{2})';
 
@@ -188,6 +198,10 @@ final class RaiffeisenbankStatementPdfParser implements BankStatementPdfParserIn
     {
         $raw = preg_split('/\r\n|\n|\r/', $text) ?: [];
 
+        // Měna účtu z hlavičky (default CZK) — účetní částka transakce je vždy v ní; u
+        // kartové platby v cizí měně se tím odliší od původní částky/kurzu (issue #205).
+        $currency = preg_match('/Číslo účtu:\s*[\d-]+\/\d{4}\s+([A-Z]{3})/u', $text, $cm) ? $cm[1] : 'CZK';
+
         // Očistit řádky (NBSP→mezera, ořez okrajů; VNITŘNÍ taby zachovat — slepené sloupce),
         // odfiltrovat opakovaná záhlaví/patičky a useknout tabulku na koncovém markeru.
         $lines = [];
@@ -213,7 +227,7 @@ final class RaiffeisenbankStatementPdfParser implements BankStatementPdfParserIn
         for ($k = 0; $k < $cnt; $k++) {
             $from = $starts[$k];
             $to = ($k + 1 < $cnt) ? $starts[$k + 1] : $n;
-            $row = $this->parseSlice(array_slice($lines, $from, $to - $from));
+            $row = $this->parseSlice(array_slice($lines, $from, $to - $from), $currency);
             if ($row !== null) $rows[] = $row;
         }
         return $rows;
@@ -243,7 +257,7 @@ final class RaiffeisenbankStatementPdfParser implements BankStatementPdfParserIn
     /**
      * @param list<string> $slice
      */
-    private function parseSlice(array $slice): ?array
+    private function parseSlice(array $slice, string $currency = 'CZK'): ?array
     {
         $n = count($slice);
         // slice[0] = datum zaúčtování, slice[1] = valuta (přeskočit).
@@ -258,12 +272,21 @@ final class RaiffeisenbankStatementPdfParser implements BankStatementPdfParserIn
             $idx++;
         }
 
-        // Částka = POSLEDNÍ peněžní hodnota (s tečkou) ve zbytku slice; jen ona má desetinná
-        // místa (symboly/reference jsou celočíselné), takže „poslední s .dd" je jednoznačné.
+        // Částka = POSLEDNÍ peněžní hodnota (s tečkou) ve zbytku slice, ale JEN ve měně účtu.
+        // Symboly/reference jsou celočíselné, takže „poslední s .dd" je jednoznačné; u kartové
+        // platby v cizí měně se ale za CZK částkou tiskne ještě původní částka („-6.06 USD")
+        // a kurz („21.83 CZK/USD") — obojí je nutné vynechat, jinak by amount = kurz (#205).
         $amount = null;
         for ($j = $idx; $j < $n; $j++) {
-            if (preg_match_all('/' . self::AMOUNT . '/u', $slice[$j], $mm)) {
-                $amount = $this->num($mm[0][count($mm[0]) - 1]);
+            if (preg_match(self::FX_RATE_LINE, $slice[$j])) continue; // řádek kurzu, ne částka
+            // Hodnota s volitelným měnovým sufixem; cizí měnu (např. USD) přeskoč, ber jen
+            // částku bez sufixu nebo v měně účtu.
+            if (preg_match_all('/(' . self::AMOUNT . ')(?:\s*([A-Z]{3}))?/u', $slice[$j], $mm, PREG_SET_ORDER)) {
+                foreach ($mm as $match) {
+                    $suffix = $match[2] ?? '';
+                    if ($suffix !== '' && $suffix !== $currency) continue; // původní částka v cizí měně
+                    $amount = $this->num($match[1]);
+                }
             }
         }
         if ($amount === null) {
@@ -279,6 +302,8 @@ final class RaiffeisenbankStatementPdfParser implements BankStatementPdfParserIn
         $texts = [];
 
         for ($j = $idx; $j < $n; $j++) {
+            // Řádek kurzu („21.83 CZK/USD") není textové pole dokladu — přeskočit celý.
+            if (preg_match(self::FX_RATE_LINE, $slice[$j])) continue;
             // Odstranit částku (+ volitelný sufix měny) z řádku pro další zpracování.
             $line = trim((string) preg_replace('/' . self::AMOUNT . '(?:\s*[A-Z]{3})?/u', '', $slice[$j]));
             if ($line === '') continue;

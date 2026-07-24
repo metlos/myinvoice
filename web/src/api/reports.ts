@@ -32,6 +32,21 @@ export interface DphSettings {
   has_financial_office: boolean
 }
 
+export interface KhPreview {
+  summary: {
+    period: string
+    a1_count: number
+    a2_count: number
+    a4_count: number
+    a5_count_aggregated: number
+    b1_count: number
+    b2_count: number
+    b3_count_aggregated: number
+    submission_deadline: string
+  }
+  warnings: string[]
+}
+
 export interface DphTrendRow {
   period: string
   vat_output: number
@@ -106,6 +121,87 @@ export interface DphBookPreview {
   }
 }
 
+export interface OssPreview {
+  period: {
+    year: number
+    quarter: number
+    start: string
+    end: string
+    label: string
+    submission_deadline: string
+  }
+  settings: {
+    oss_enabled: boolean
+    oss_valid_from: string | null
+    oss_valid_to: string | null
+    oss_identification_country: string | null
+    oss_return_currency: string
+  }
+  summary: {
+    return_currency: string
+    total_base: number
+    total_vat: number
+    total_corrections: number
+    total_payable: number
+    invoice_count: number
+    row_count: number
+    correction_row_count: number
+    invalid_correction_count: number
+    conversion_missing_count: number
+  }
+  countries: Array<{
+    country: string
+    base: number
+    vat: number
+    rates: Array<{
+      rate: number
+      rate_type: string | null
+      base: number
+      vat: number
+      count: number
+    }>
+    rows: Array<{
+      invoice_id: number
+      item_id: number
+      doc_number: string | null
+      invoice_type: string
+      tax_date: string | null
+      client_name: string
+      description: string
+      currency: string
+      base: number
+      vat: number
+      base_return: number
+      vat_return: number
+      vat_rate: number
+      rate_type: string | null
+      supply_type: string | null
+    }>
+  }>
+  corrections: Array<{
+    period: string
+    year: number
+    quarter: number
+    state_consumption: string
+    correction: number
+    count: number
+    rows: Array<{
+      invoice_id: number
+      item_id: number
+      doc_number: string | null
+      invoice_type: string
+      tax_date: string | null
+      client_name: string
+      description: string
+      currency: string
+      base_return: number
+      vat_return: number
+      original_period: string
+    }>
+  }>
+  warnings: string[]
+}
+
 export type MonthlyExportPart =
   | 'sales_pdf' | 'sales_isdoc' | 'purchase_pdf' | 'purchase_isdoc'
   | 'bank_pdf' | 'bank_gpc' | 'dph_book'
@@ -164,19 +260,9 @@ export const reportsApi = {
     }).then(r => r.data),
 
   khPreview: (year: number, month: number, period?: 'monthly' | 'quarterly') =>
-    api.get<{
-      summary: {
-        period: string
-        a1_count: number
-        a4_count: number
-        a5_count_aggregated: number
-        b1_count: number
-        b2_count: number
-        b3_count_aggregated: number
-        submission_deadline: string
-      }
-      warnings: string[]
-    }>('/reports/dphkh1/preview', { params: { year, month, ...(period ? { period } : {}) } }).then(r => r.data),
+    api.get<KhPreview>('/reports/dphkh1/preview', {
+      params: { year, month, ...(period ? { period } : {}) },
+    }).then(r => r.data),
 
   // Souhrnné hlášení (EU dodání) — plátci i identifikované osoby; lze kvartálně pro služby
   shvPreview: (year: number, month: number, period?: 'monthly' | 'quarterly') =>
@@ -242,6 +328,16 @@ export const reportsApi = {
     api.get<DphBookPreview>('/reports/dph-book/preview', {
       params: period ? { year, month, period } : { year, month },
     }).then(r => r.data),
+
+  ossPreview: (year: number, quarter: number) =>
+    api.get<OssPreview>('/reports/oss/preview', { params: { year, quarter } }).then(r => r.data),
+
+  ossDownloadUrl: (year: number, quarter: number) => {
+    const sid = localStorage.getItem('myinvoice.current_supplier_id')
+    const params = new URLSearchParams({ year: String(year), quarter: String(quarter) })
+    if (sid && /^\d+$/.test(sid)) params.set('supplier_id', sid)
+    return `/api/reports/oss?${params.toString()}`
+  },
 
   dphBookPdfUrl: (year: number, month: number, period?: 'monthly' | 'quarterly') => {
     const sid = localStorage.getItem('myinvoice.current_supplier_id')

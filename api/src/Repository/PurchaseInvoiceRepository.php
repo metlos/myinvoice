@@ -266,6 +266,10 @@ final class PurchaseInvoiceRepository
         if (!empty($filters['needs_review'])) {
             $where[] = "pi.extraction_warning IS NOT NULL";
         }
+        if (!empty($filters['import_batch_id'])) {
+            $where[] = 'pi.import_batch_id = ?';
+            $params[] = (string) $filters['import_batch_id'];
+        }
         // „Předané k úhradě" — odvozená dimenze (příznak payment_ordered_at), NE status.
         // '1' = předané, '0' = nepředané. Status zůstává received/booked/paid (ortogonální).
         if (isset($filters['payment_ordered']) && $filters['payment_ordered'] !== null && $filters['payment_ordered'] !== '') {
@@ -1566,6 +1570,91 @@ final class PurchaseInvoiceRepository
         $pdo->prepare(
             'UPDATE purchase_invoices SET extraction_warning = ? WHERE id = ? AND supplier_id = ?'
         )->execute([$combined, $id, $supplierId]);
+    }
+
+    /**
+     * Označí přijatou fakturu identifikátorem importní dávky (#232). Volá se po
+     * úspěšném vytvoření dokladu při hromadném AI importu, ať jde dávka později
+     * dohledat/filtrovat v seznamu. Idempotentní (přepíše na stejnou hodnotu).
+     */
+    public function setImportBatchId(int $id, int $supplierId, string $batchId): void
+    {
+        $batchId = substr(trim($batchId), 0, 32);
+        if ($batchId === '') {
+            return;
+        }
+        $this->db->pdo()->prepare(
+            'UPDATE purchase_invoices SET import_batch_id = ? WHERE id = ? AND supplier_id = ?'
+        )->execute([$batchId, $id, $supplierId]);
+    }
+
+    /**
+     * Rychlá změna typu dokladu (#232) — pro opravu po AI importu, kdy AI účtenku
+     * klasifikuje jako `receipt` („Doklad o úhradě"), ale účetní ji chce vést jako
+     * `invoice`. Řádkové totály ani `prices_include_vat` NEmění (jsou uložené), jde
+     * jen o metadata/zařazení. Přechod z/na `advance` je vyloučen (má vazby na
+     * settlement — ten se řeší jen v editoru); stornovaný doklad měnit nelze.
+     *
+     * @return string|null  chybová hláška (pro UI), nebo null při úspěchu
+     */
+    public function updateDocumentKind(int $id, int $supplierId, string $kind): ?string
+    {
+        $allowed = ['invoice', 'receipt', 'credit_note', 'advance'];
+        if (!in_array($kind, $allowed, true)) {
+            return 'Neplatný typ dokladu.';
+        }
+        $pdo = $this->db->pdo();
+        $stmt = $pdo->prepare(
+            'SELECT document_kind, status FROM purchase_invoices WHERE id = ? AND supplier_id = ?'
+        );
+        $stmt->execute([$id, $supplierId]);
+        $row = $stmt->fetch(\PDO::FETCH_ASSOC);
+        if ($row === false) {
+            return 'Doklad nenalezen.';
+        }
+        $current = (string) $row['document_kind'];
+        if ($current === $kind) {
+            return null; // no-op
+        }
+        if ((string) $row['status'] === 'cancelled') {
+            return 'Stornovaný doklad nelze měnit.';
+        }
+        if ($current === 'advance' || $kind === 'advance') {
+            return 'Změnu na/ze zálohy proveďte v editoru dokladu (má vazby na vyúčtování).';
+        }
+        $pdo->prepare(
+            'UPDATE purchase_invoices SET document_kind = ? WHERE id = ? AND supplier_id = ?'
+        )->execute([$kind, $id, $supplierId]);
+        return null;
+    }
+
+    /**
+     * Posledních N importních dávek (#232) — pro dropdown „dohledat import" v seznamu
+     * přijatých. Vrací id dávky, čas první faktury v dávce a počet dokladů.
+     *
+     * @return list<array{import_batch_id:string, created_at:string, count:int}>
+     */
+    public function recentImportBatches(int $supplierId, int $limit = 20): array
+    {
+        $limit = max(1, min(100, $limit));
+        $stmt = $this->db->pdo()->prepare(
+            'SELECT import_batch_id, MIN(created_at) AS created_at, COUNT(*) AS cnt
+               FROM purchase_invoices
+              WHERE supplier_id = ? AND import_batch_id IS NOT NULL
+              GROUP BY import_batch_id
+              ORDER BY created_at DESC
+              LIMIT ' . $limit
+        );
+        $stmt->execute([$supplierId]);
+        $out = [];
+        foreach ($stmt->fetchAll(\PDO::FETCH_ASSOC) as $r) {
+            $out[] = [
+                'import_batch_id' => (string) $r['import_batch_id'],
+                'created_at'      => (string) $r['created_at'],
+                'count'           => (int) $r['cnt'],
+            ];
+        }
+        return $out;
     }
 
     public function updateTotals(int $id, float $withoutVat, float $vat, float $withVat, float $rounding): void

@@ -146,6 +146,13 @@ final class RateLimitMiddleware implements MiddlewareInterface
             return ['rl:approval:ip:' . $this->ipBucket($ip), (int) ($rl['approval_per_min_per_ip'] ?? 30), 60];
         }
 
+        // Veřejná web faktura (bez auth, jen token) — IP bucket proti anonymnímu
+        // DoS (náhled + PDF render + přílohy). userId je tu vždy 0. Limit vyšší
+        // než approval: legit návštěva = 1 GET + PDF + N příloh.
+        if (str_starts_with($path, '/api/public/invoice/')) {
+            return ['rl:pubinv:ip:' . $this->ipBucket($ip), (int) ($rl['invoice_public_per_min_per_ip'] ?? 60), 60];
+        }
+
         // ARES / VIES / CRPDPH lookups (per user) — chrání 24h cache před zaplněním
         if (in_array($path, ['/api/clients/lookup-ares', '/api/clients/lookup-vies', '/api/clients/lookup-bank'], true) && $userId > 0) {
             return ['rl:ares:user:' . $userId, (int) ($rl['ares_per_min_per_user'] ?? 30), 60];

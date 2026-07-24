@@ -3,10 +3,12 @@ import { ref, computed, onMounted, watch, nextTick } from 'vue'
 import { useRoute, useRouter } from 'vue-router'
 import { useI18n } from 'vue-i18n'
 import { recurringApi, type RecurringTemplate, type RecurringTemplatePayload, type Frequency } from '@/api/recurring'
+import { apiErrorMessage } from '@/api/errors'
 import { clientsApi, type Client, type ViesLookupResult } from '@/api/clients'
 import { projectsApi, type Project } from '@/api/projects'
 import { codebooksApi, type VatRate, type Currency, type Unit } from '@/api/codebooks'
 import { revenueCategoriesApi, type RevenueCategory } from '@/api/revenueCategories'
+import { priceListApi, type CatalogDescriptionSource, type CatalogPolicy, type PriceListItem, type ResolvedPriceListItem } from '@/api/priceList'
 import { useToast } from '@/composables/useToast'
 import { useSupplierStore } from '@/stores/supplier'
 import { formatMoney } from '@/composables/useFormat'
@@ -82,6 +84,27 @@ const currencies = ref<Currency[]>([])
 const vatRates = ref<VatRate[]>([])
 const units = ref<Unit[]>([])
 const revenueCategories = ref<RevenueCategory[]>([])
+const priceListItems = ref<PriceListItem[]>([])
+const catalogResolving = ref<number | null>(null)
+// Ceníkové ovládání v řádcích skryj, dokud dodavatel nemá žádnou použitelnou položku
+// (existující napojené řádky zůstanou editovatelné i tak).
+const hasPriceList = computed(() => priceListItems.value.length > 0)
+
+async function loadPriceListItems() {
+  const currency = currencies.value.find(item => item.id === form.value.currency_id)?.code
+  if (!currency) return
+  try {
+    const result = await priceListApi.list({
+      currency,
+      client_id: form.value.client_id ?? undefined,
+      prices_include_vat: form.value.prices_include_vat,
+      per_page: 200,
+    })
+    priceListItems.value = result.data
+  } catch {
+    priceListItems.value = []
+  }
+}
 // Label kategorie načtené šablony — pro případ, že je mezitím archivovaná
 // (list(false) vrací jen aktivní) a v selectu by jinak „zmizela".
 const loadedCategoryLabel = ref<string | null>(null)
@@ -97,6 +120,16 @@ type FormItem = {
   unit_price_without_vat: number
   vat_rate_id: number
   order_index: number
+  price_list_item_id: number | null
+  catalog_policy: CatalogPolicy
+  description_source: CatalogDescriptionSource
+  catalog_price_source: string | null
+  catalog_source_currency_code: string | null
+  catalog_source_unit_price: number | null
+  catalog_exchange_rate: number | null
+  catalog_exchange_rate_date: string | null
+  accept_catalog_changes: boolean
+  catalog_current: ResolvedPriceListItem | null
 }
 
 const form = ref<{
@@ -185,7 +218,90 @@ function blankItem(): FormItem {
     unit_price_without_vat: 0,
     vat_rate_id: defaultVatRateId(),
     order_index: form.value.items.length,
+    price_list_item_id: null,
+    catalog_policy: 'fixed',
+    description_source: 'template',
+    catalog_price_source: null,
+    catalog_source_currency_code: null,
+    catalog_source_unit_price: null,
+    catalog_exchange_rate: null,
+    catalog_exchange_rate_date: null,
+    accept_catalog_changes: false,
+    catalog_current: null,
   }
+}
+
+async function applyCatalogItem(item: FormItem, index: number, preservePolicy = false) {
+  if (!item.price_list_item_id) {
+    Object.assign(item, {
+      price_list_item_id: null,
+      catalog_policy: 'fixed',
+      description_source: 'template',
+      catalog_price_source: null,
+      catalog_source_currency_code: null,
+      catalog_source_unit_price: null,
+      catalog_exchange_rate: null,
+      catalog_exchange_rate_date: null,
+      accept_catalog_changes: false,
+      catalog_current: null,
+    })
+    return
+  }
+  if (!form.value.client_id || !form.value.currency_id) {
+    error.value = t('recurring.catalog_requires_context')
+    return
+  }
+  catalogResolving.value = index
+  const policy = item.catalog_policy
+  try {
+    const resolved = await priceListApi.resolve(item.price_list_item_id, {
+      client_id: form.value.client_id,
+      currency_id: form.value.currency_id,
+      rate_date: form.value.anchor_date || today(),
+      prices_include_vat: form.value.prices_include_vat,
+    })
+    Object.assign(item, {
+      description: resolved.description,
+      unit: resolved.unit,
+      unit_price_without_vat: resolved.unit_price_without_vat,
+      vat_rate_id: resolved.vat_rate_id,
+      catalog_policy: preservePolicy ? policy : 'fixed',
+      description_source: 'catalog',
+      catalog_price_source: resolved.catalog_price_source,
+      catalog_source_currency_code: resolved.catalog_source_currency_code,
+      catalog_source_unit_price: resolved.catalog_source_unit_price,
+      catalog_exchange_rate: resolved.catalog_exchange_rate,
+      catalog_exchange_rate_date: resolved.catalog_exchange_rate_date,
+      accept_catalog_changes: true,
+      catalog_current: null,
+    })
+  } catch (e) {
+    error.value = apiErrorMessage(e)
+  } finally {
+    catalogResolving.value = null
+  }
+}
+
+function catalogSnapshotChanged(item: FormItem): boolean {
+  const current = item.catalog_current
+  if (!current) return false
+  return item.catalog_price_source !== current.catalog_price_source
+    || item.catalog_source_currency_code !== current.catalog_source_currency_code
+    || Math.abs(Number(item.catalog_source_unit_price ?? 0) - current.catalog_source_unit_price) >= 0.005
+    || item.unit !== current.unit
+    || item.vat_rate_id !== current.vat_rate_id
+    || (item.description_source === 'catalog' && item.description !== current.description)
+}
+
+function catalogCurrentLabel(item: FormItem): string {
+  const current = item.catalog_current
+  if (!current) return ''
+  return t('recurring.catalog_current_values', {
+    price: current.catalog_source_unit_price,
+    currency: current.catalog_source_currency_code,
+    unit: current.unit,
+    vat: current.vat_rate_percent,
+  })
 }
 
 function addItem() {
@@ -419,6 +535,11 @@ watch(() => form.value.draft_open_mode, (m) => {
   if (m === 'period_start') form.value.auto_issue = true
 })
 
+watch(
+  () => [form.value.client_id, form.value.currency_id, form.value.prices_include_vat] as const,
+  () => { if (formLoaded.value) void loadPriceListItems() },
+)
+
 onMounted(async () => {
   loading.value = true
   try {
@@ -433,6 +554,7 @@ onMounted(async () => {
     vatRates.value = vat
     units.value = un
     revenueCategories.value = rcat
+    await loadPriceListItems()
 
     if (form.value.currency_id === 0) {
       const def = cur.find(c => c.is_default && c.code === 'CZK') || cur[0]
@@ -485,6 +607,16 @@ onMounted(async () => {
           unit_price_without_vat: it.unit_price_without_vat,
           vat_rate_id: it.vat_rate_id,
           order_index: i,
+          price_list_item_id: null,
+          catalog_policy: 'fixed',
+          description_source: 'template',
+          catalog_price_source: null,
+          catalog_source_currency_code: null,
+          catalog_source_unit_price: null,
+          catalog_exchange_rate: null,
+          catalog_exchange_rate_date: null,
+          accept_catalog_changes: false,
+          catalog_current: null,
         }))
         if (inv.client_id) await loadProjectsForClient(inv.client_id)
       } catch {
@@ -527,6 +659,16 @@ onMounted(async () => {
           unit_price_without_vat: it.unit_price_without_vat,
           vat_rate_id: it.vat_rate_id,
           order_index: it.order_index,
+          price_list_item_id: it.price_list_item_id ?? null,
+          catalog_policy: it.catalog_policy ?? 'fixed',
+          description_source: it.description_source ?? 'template',
+          catalog_price_source: it.catalog_price_source ?? null,
+          catalog_source_currency_code: it.catalog_source_currency_code ?? null,
+          catalog_source_unit_price: it.catalog_source_unit_price ?? null,
+          catalog_exchange_rate: it.catalog_exchange_rate ?? null,
+          catalog_exchange_rate_date: it.catalog_exchange_rate_date ?? null,
+          accept_catalog_changes: false,
+          catalog_current: null,
         })),
       })
       loadedCategoryLabel.value = tpl.revenue_category_label ?? null
@@ -534,6 +676,20 @@ onMounted(async () => {
     }
   } finally {
     loading.value = false
+    await loadPriceListItems()
+    await Promise.all(form.value.items.map(async item => {
+      if (!item.price_list_item_id || item.catalog_policy !== 'review_required' || !form.value.client_id || !form.value.currency_id) return
+      try {
+        item.catalog_current = await priceListApi.resolve(item.price_list_item_id, {
+          client_id: form.value.client_id,
+          currency_id: form.value.currency_id,
+          rate_date: form.value.anchor_date || today(),
+          prices_include_vat: form.value.prices_include_vat,
+        })
+      } catch {
+        item.catalog_current = null
+      }
+    }))
     formLoaded.value = true
   }
 })
@@ -597,6 +753,15 @@ async function submit() {
         unit_price_without_vat: it.unit_price_without_vat,
         vat_rate_id: it.vat_rate_id,
         order_index: i,
+        price_list_item_id: it.price_list_item_id,
+        catalog_policy: it.catalog_policy,
+        description_source: it.description_source,
+        catalog_price_source: it.catalog_price_source,
+        catalog_source_currency_code: it.catalog_source_currency_code,
+        catalog_source_unit_price: it.catalog_source_unit_price,
+        catalog_exchange_rate: it.catalog_exchange_rate,
+        catalog_exchange_rate_date: it.catalog_exchange_rate_date,
+        accept_catalog_changes: it.accept_catalog_changes,
       })),
     }
     if (isEdit.value && tplId.value) {
@@ -886,17 +1051,43 @@ async function submit() {
           </thead>
           <tbody>
             <tr v-for="(it, idx) in form.items" :key="idx" :class="['border-t border-neutral-200', itemHasBothNegative(it) ? 'bg-danger-50' : '']">
-              <td class="py-1.5 pr-2"><input v-model="it.description" type="text" data-row-input="rec-item" class="w-full h-8 px-2 border border-neutral-300 rounded" /></td>
-              <td class="py-1.5 pr-2"><input v-model="it.quantity" v-math type="text" inputmode="decimal" :class="['w-full h-8 px-2 border rounded text-right font-mono', itemHasBothNegative(it) ? 'border-danger-400' : 'border-neutral-300']" /></td>
               <td class="py-1.5 pr-2">
-                <select v-model="it.unit" class="w-full h-8 px-1 border border-neutral-300 rounded bg-surface text-sm">
+                <div v-if="hasPriceList || it.price_list_item_id" class="mb-1 grid gap-1 xl:grid-cols-3">
+                  <select v-model.number="it.price_list_item_id" class="h-8 min-w-0 px-2 border border-neutral-300 rounded bg-surface text-xs" @change="applyCatalogItem(it, idx)">
+                    <option :value="null">{{ t('recurring.catalog_manual') }}</option>
+                    <option v-for="catalogItem in priceListItems" :key="catalogItem.id" :value="catalogItem.id">{{ catalogItem.code }} · {{ catalogItem.name }}</option>
+                  </select>
+                  <select v-if="it.price_list_item_id" v-model="it.catalog_policy" class="h-8 min-w-0 px-2 border border-neutral-300 rounded bg-surface text-xs">
+                    <option value="fixed">{{ t('recurring.catalog_policy_fixed') }}</option>
+                    <option value="current">{{ t('recurring.catalog_policy_current') }}</option>
+                    <option value="review_required">{{ t('recurring.catalog_policy_review_required') }}</option>
+                  </select>
+                  <select v-if="it.price_list_item_id" v-model="it.description_source" class="h-8 min-w-0 px-2 border border-neutral-300 rounded bg-surface text-xs">
+                    <option value="catalog">{{ t('recurring.catalog_description_catalog') }}</option>
+                    <option value="template">{{ t('recurring.catalog_description_template') }}</option>
+                  </select>
+                </div>
+                <input v-model="it.description" type="text" data-row-input="rec-item" :disabled="!!it.price_list_item_id && it.description_source === 'catalog'" class="w-full h-8 px-2 border border-neutral-300 rounded bg-surface disabled:bg-neutral-100" />
+                <p v-if="it.price_list_item_id" class="mt-1 text-xs text-neutral-500">
+                  {{ catalogResolving === idx ? t('common.loading') : t('recurring.catalog_snapshot', { currency: it.catalog_source_currency_code ?? '—', price: it.catalog_source_unit_price ?? '—' }) }}
+                  <button v-if="it.catalog_policy === 'review_required'" type="button" class="ml-2 text-primary-700 hover:underline" @click="applyCatalogItem(it, idx, true)">
+                    {{ t('recurring.catalog_accept_changes') }}
+                  </button>
+                </p>
+                <p v-if="it.catalog_policy === 'review_required' && catalogSnapshotChanged(it)" class="mt-1 text-xs text-warning-700">
+                  {{ catalogCurrentLabel(it) }}
+                </p>
+              </td>
+              <td class="py-1.5 pr-2"><input v-model="it.quantity" v-math type="text" inputmode="decimal" :class="['w-full h-8 px-2 border rounded bg-surface text-right font-mono', itemHasBothNegative(it) ? 'border-danger-400' : 'border-neutral-300']" /></td>
+              <td class="py-1.5 pr-2">
+                <select v-model="it.unit" :disabled="!!it.price_list_item_id" class="w-full h-8 px-1 border border-neutral-300 rounded bg-surface text-sm disabled:bg-neutral-100">
                   <option v-for="u in units" :key="u.id" :value="u.code">{{ u.code }}</option>
                   <option v-if="it.unit && !units.some(u => u.code === it.unit)" :value="it.unit">{{ it.unit }}</option>
                 </select>
               </td>
-              <td class="py-1.5 pr-2"><input v-model="it.unit_price_without_vat" v-math type="text" inputmode="decimal" :class="['w-full h-8 px-2 border rounded text-right font-mono', itemHasBothNegative(it) ? 'border-danger-400' : 'border-neutral-300']" /></td>
+              <td class="py-1.5 pr-2"><input v-model="it.unit_price_without_vat" v-math type="text" inputmode="decimal" :disabled="!!it.price_list_item_id" :class="['w-full h-8 px-2 border rounded bg-surface text-right font-mono disabled:bg-neutral-100', itemHasBothNegative(it) ? 'border-danger-400' : 'border-neutral-300']" /></td>
               <td v-if="supplierIsVatPayer" class="py-1.5 pr-2">
-                <select v-model.number="it.vat_rate_id" class="w-full h-8 px-2 border border-neutral-300 rounded bg-surface">
+                <select v-model.number="it.vat_rate_id" :disabled="!!it.price_list_item_id" class="w-full h-8 px-2 border border-neutral-300 rounded bg-surface disabled:bg-neutral-100">
                   <option v-for="r in vatRates" :key="r.id" :value="r.id">
                     {{ Number(r.rate_percent) > 0 ? r.rate_percent + ' %' : (r.is_reverse_charge ? 'RC' : '0 %') }}
                   </option>
@@ -917,18 +1108,45 @@ async function submit() {
               <span class="font-mono">#{{ idx + 1 }}</span>
               <button type="button" @click="removeItem(idx)" class="cursor-pointer w-8 h-8 inline-flex items-center justify-center border border-danger-500/40 text-danger-500 hover:bg-danger-50 rounded text-lg leading-none">×</button>
             </div>
+            <div v-if="hasPriceList || it.price_list_item_id" class="space-y-2">
+              <label class="block text-xs font-medium text-neutral-600">{{ t('recurring.catalog_item') }}</label>
+              <select v-model.number="it.price_list_item_id" class="w-full h-10 px-3 border border-neutral-300 rounded bg-surface text-sm" @change="applyCatalogItem(it, idx)">
+                <option :value="null">{{ t('recurring.catalog_manual') }}</option>
+                <option v-for="catalogItem in priceListItems" :key="catalogItem.id" :value="catalogItem.id">{{ catalogItem.code }} · {{ catalogItem.name }}</option>
+              </select>
+              <div v-if="it.price_list_item_id" class="grid grid-cols-2 gap-2">
+                <select v-model="it.catalog_policy" class="h-10 px-2 border border-neutral-300 rounded bg-surface text-xs">
+                  <option value="fixed">{{ t('recurring.catalog_policy_fixed') }}</option>
+                  <option value="current">{{ t('recurring.catalog_policy_current') }}</option>
+                  <option value="review_required">{{ t('recurring.catalog_policy_review_required') }}</option>
+                </select>
+                <select v-model="it.description_source" class="h-10 px-2 border border-neutral-300 rounded bg-surface text-xs">
+                  <option value="catalog">{{ t('recurring.catalog_description_catalog') }}</option>
+                  <option value="template">{{ t('recurring.catalog_description_template') }}</option>
+                </select>
+              </div>
+              <button v-if="it.price_list_item_id && it.catalog_policy === 'review_required'" type="button" class="text-left text-xs text-primary-700 hover:underline" @click="applyCatalogItem(it, idx, true)">
+                {{ t('recurring.catalog_accept_changes') }}
+              </button>
+              <p v-if="it.price_list_item_id" class="text-xs text-neutral-500">
+                {{ t('recurring.catalog_snapshot', { currency: it.catalog_source_currency_code ?? '—', price: it.catalog_source_unit_price ?? '—' }) }}
+              </p>
+              <p v-if="it.catalog_policy === 'review_required' && catalogSnapshotChanged(it)" class="text-xs text-warning-700">
+                {{ catalogCurrentLabel(it) }}
+              </p>
+            </div>
             <div>
               <label class="block text-xs font-medium text-neutral-600 mb-1">{{ t('invoice.items_table.description') }}</label>
-              <input v-model="it.description" type="text" data-row-input="rec-item" class="w-full h-10 px-3 border border-neutral-300 rounded text-sm" />
+              <input v-model="it.description" type="text" data-row-input="rec-item" :disabled="!!it.price_list_item_id && it.description_source === 'catalog'" class="w-full h-10 px-3 border border-neutral-300 rounded bg-surface text-sm disabled:bg-neutral-100" />
             </div>
             <div class="grid grid-cols-2 gap-2">
               <div>
                 <label class="block text-xs font-medium text-neutral-600 mb-1">{{ t('invoice.items_table.qty') }}</label>
-                <input v-model="it.quantity" v-math type="text" inputmode="decimal" :class="['w-full h-10 px-3 border rounded text-right font-mono text-sm', itemHasBothNegative(it) ? 'border-danger-400' : 'border-neutral-300']" />
+                <input v-model="it.quantity" v-math type="text" inputmode="decimal" :class="['w-full h-10 px-3 border rounded bg-surface text-right font-mono text-sm', itemHasBothNegative(it) ? 'border-danger-400' : 'border-neutral-300']" />
               </div>
               <div>
                 <label class="block text-xs font-medium text-neutral-600 mb-1">{{ t('invoice.items_table.unit') }}</label>
-                <select v-model="it.unit" class="w-full h-10 px-2 border border-neutral-300 rounded bg-surface text-sm">
+                <select v-model="it.unit" :disabled="!!it.price_list_item_id" class="w-full h-10 px-2 border border-neutral-300 rounded bg-surface text-sm disabled:bg-neutral-100">
                   <option v-for="u in units" :key="u.id" :value="u.code">{{ u.code }}</option>
                   <option v-if="it.unit && !units.some(u => u.code === it.unit)" :value="it.unit">{{ it.unit }}</option>
                 </select>
@@ -937,11 +1155,11 @@ async function submit() {
             <div :class="supplierIsVatPayer ? 'grid grid-cols-2 gap-2' : ''">
               <div>
                 <label class="block text-xs font-medium text-neutral-600 mb-1">{{ unitPriceHeaderLabel }}</label>
-                <input v-model="it.unit_price_without_vat" v-math type="text" inputmode="decimal" :class="['w-full h-10 px-3 border rounded text-right font-mono text-sm', itemHasBothNegative(it) ? 'border-danger-400' : 'border-neutral-300']" />
+                <input v-model="it.unit_price_without_vat" v-math type="text" inputmode="decimal" :disabled="!!it.price_list_item_id" :class="['w-full h-10 px-3 border rounded bg-surface text-right font-mono text-sm disabled:bg-neutral-100', itemHasBothNegative(it) ? 'border-danger-400' : 'border-neutral-300']" />
               </div>
               <div v-if="supplierIsVatPayer">
                 <label class="block text-xs font-medium text-neutral-600 mb-1">{{ t('invoice.items_table.vat') ?? 'DPH' }}</label>
-                <select v-model.number="it.vat_rate_id" class="w-full h-10 px-2 border border-neutral-300 rounded bg-surface text-sm">
+                <select v-model.number="it.vat_rate_id" :disabled="!!it.price_list_item_id" class="w-full h-10 px-2 border border-neutral-300 rounded bg-surface text-sm disabled:bg-neutral-100">
                   <option v-for="r in vatRates" :key="r.id" :value="r.id">
                     {{ Number(r.rate_percent) > 0 ? r.rate_percent + ' %' : (r.is_reverse_charge ? 'RC' : '0 %') }}
                   </option>

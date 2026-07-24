@@ -28,8 +28,11 @@ final class Validation
         if (empty($data['zip']) || trim((string) $data['zip']) === '') {
             $err['zip'][] = 'PSČ je povinné';
         }
-        if (empty($data['main_email']) || !filter_var($data['main_email'], FILTER_VALIDATE_EMAIL)) {
-            $err['main_email'][] = 'Hlavní email je povinný a musí být platný';
+        // Hlavní e-mail je nepovinný (#221) — historické doklady ho často nemají.
+        // Když ale vyplněný je, musí být platný.
+        $mainEmail = trim((string) ($data['main_email'] ?? ''));
+        if ($mainEmail !== '' && !filter_var($mainEmail, FILTER_VALIDATE_EMAIL)) {
+            $err['main_email'][] = 'Hlavní email musí být platný';
         }
         if (!empty($data['phone']) && strlen((string) $data['phone']) > 40) {
             $err['phone'][] = 'Telefon je příliš dlouhý';

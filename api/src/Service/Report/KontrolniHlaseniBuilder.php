@@ -63,8 +63,15 @@ final class KontrolniHlaseniBuilder
         $end = (new \DateTimeImmutable(sprintf('%04d-%02d-01', $year, $endMonth)))->modify('last day of this month')->format('Y-m-d');
 
         // Všechny sekce z jedné projekce kanonických řádků (VatLedgerService).
-        ['a1' => $a1, 'a2' => $a2, 'a4' => $a4, 'a5' => $a5, 'b1' => $b1, 'b2' => $b2, 'b3' => $b3]
+        ['a1' => $a1, 'a2' => $a2, 'a4' => $a4, 'a5' => $a5, 'b1' => $b1, 'b2' => $b2, 'b3' => $b3,
+         'missing_rates' => $missingRates]
             = $this->collectSections($supplierId, $start, $end);
+        // #238: doklady v cizí měně bez kurzu — akce je při stažení doplní z ČNB.
+        if ($missingRates !== []) {
+            $warnings[] = 'Chybí kurz u dokladů v cizí měně: '
+                . implode(', ', VatLedgerService::missingExchangeRateLabels($missingRates))
+                . '. Při stažení XML se doplní z ČNB.';
+        }
         $a1 = $this->filterReverseChargeRowsWithDic($a1, 'A.1', $warnings);
         $b1 = $this->filterReverseChargeRowsWithDic($b1, 'B.1', $warnings);
         $a4 = $this->filterKhAttributeConflicts($a4, 'A.4', $warnings);
@@ -291,6 +298,7 @@ final class KontrolniHlaseniBuilder
                 'submission_deadline' => $deadline,
             ],
             'warnings' => $warnings,
+            'missing_rates' => $missingRates,
         ];
     }
 
@@ -318,8 +326,13 @@ final class KontrolniHlaseniBuilder
         $bucket = $this->taxConstants->vatBucketThreshold($periodYear);
 
         // Agregace kanonických řádků per (zdroj, faktura).
+        $ledgerRows = $this->ledger->rows($supplierId, $start, $end, includeDrafts: false);
+        // Daňová pojistka (issue #238): non-CZK doklad bez kurzu by se do KH dostal
+        // s náhradním kurzem 1.0 (cizí měna jako CZK). NEházíme chybu — vrátíme doklady
+        // bez kurzu, akce je při stažení doplní z ČNB (náhled jen varuje).
+        $missingRates = VatLedgerService::missingExchangeRateRows($ledgerRows);
         $inv = [];
-        foreach ($this->ledger->rows($supplierId, $start, $end, includeDrafts: false) as $r) {
+        foreach ($ledgerRows as $r) {
             $key = $r['source'] . ':' . $r['invoice_id'];
             if (!isset($inv[$key])) {
                 $inv[$key] = [
@@ -460,7 +473,7 @@ final class KontrolniHlaseniBuilder
             }
         }
 
-        return ['a1' => $a1, 'a2' => $a2, 'a4' => $a4, 'a5' => $a5, 'b1' => $b1, 'b2' => $b2, 'b3' => $b3];
+        return ['a1' => $a1, 'a2' => $a2, 'a4' => $a4, 'a5' => $a5, 'b1' => $b1, 'b2' => $b2, 'b3' => $b3, 'missing_rates' => $missingRates];
     }
 
     /** @return list<string> warnings */
@@ -489,7 +502,7 @@ final class KontrolniHlaseniBuilder
                     COALESCE(c.iso2, 'CZ') AS country_iso2,
                     s.ic, s.dic, s.is_vat_payer, s.is_identified,
                     s.taxpayer_type, s.vat_period, s.financial_office_code,
-                    s.workplace_code, s.data_box_type, s.data_box_id,
+                    s.workplace_code, s.data_box_id,
                     s.email, s.phone, s.cz_nace_code,
                     s.street_number_pop, s.street_number_orient,
                     s.opr_jmeno, s.opr_prijmeni, s.opr_postaveni,
@@ -591,14 +604,22 @@ final class KontrolniHlaseniBuilder
      * u řady států obsahuje písmena (IE 1234567X, AT U12345678, NL 123456789B01, …).
      * XSD vyžaduje formát BEZ kódu členského státu — odstraníme prefix země, mezery a
      * oddělovače, zachováme alfanumerickou kmenovou část.
+     *
+     * Strháváme JEN prefix odpovídající kódu země — buď ISO 3166 (country_iso2), nebo
+     * VIES/DPH kód (u Řecka se liší: ISO "GR" vs VIES "EL", takže akceptujeme obojí).
+     * NEstrháváme libovolná 2 písmena — některá DIČ mají alfanumerickou vnitrostátní
+     * část (FR: „FRAB123456789" → „AB123456789", ne „123456789"). Issue #238.
      */
     public static function cleanEuVatId(?string $vatId, ?string $countryIso2): string
     {
         if (!$vatId) return '';
         $s = preg_replace('/[^A-Z0-9]/', '', strtoupper(trim($vatId))) ?? '';
-        $country = self::khCountryCode($countryIso2);
-        if ($country !== '' && str_starts_with($s, $country)) {
-            $s = substr($s, strlen($country));
+        $iso  = strtoupper(trim((string) $countryIso2)); // ISO 3166 (GR)
+        $vies = self::khCountryCode($countryIso2);        // VIES/DPH kód (EL pro Řecko)
+        foreach ([$vies, $iso] as $prefix) {
+            if ($prefix !== '' && str_starts_with($s, $prefix)) {
+                return substr($s, strlen($prefix));
+            }
         }
         return $s;
     }

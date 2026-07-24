@@ -140,6 +140,21 @@ final class VatClassificationMapper
     }
 
     /**
+     * Doklady v cizí měně bez zafixovaného kurzu za období (issue #238). Přiznání
+     * s náhradním kurzem 1.0 by cizí měnu vykázalo jako CZK — DphPriznaniBuilder je
+     * vrátí v `missing_rates`, akce je při stažení doplní z ČNB (náhled jen varuje).
+     *
+     * @return list<array{invoice_id:int, source:string, currency:string, tax_date:?string, issue_date:?string, doc:string}>
+     */
+    public function missingRatesForPeriod(int $supplierId, int $year, int $month, string $period = 'monthly'): array
+    {
+        [$start, $end] = $this->periodRange($year, $month, $period);
+        return VatLedgerService::missingExchangeRateRows(
+            $this->ledger->rows($supplierId, $start, $end, includeDrafts: false)
+        );
+    }
+
+    /**
      * Projekce kanonických řádků (VatLedgerService) na řádky DPHDP3. Sdílená logika
      * (klasifikace, CZK, RC samovyměření, rate bucket) žije ve službě; tady jen agregace
      * po dphdp3_line + mirror ř.43 (secondary) + ř.47 (majetek).

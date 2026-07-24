@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import { computed, ref } from 'vue'
+import { computed, ref, watch } from 'vue'
 import { useI18n } from 'vue-i18n'
 import { useYearOptions } from '@/composables/useYearOptions'
 
@@ -22,6 +22,8 @@ const year = ref(defYear)
 const quarter = ref(Math.ceil(defMonth / 3))
 const type = ref<'' | 'invoice' | 'proforma' | 'credit_note'>('')
 const dateBy = ref<'issue' | 'tax'>('issue')
+const mergePdf = ref(false)
+const signPdf = ref(false)
 const downloading = ref(false)
 const error = ref('')
 const yearOptions = useYearOptions('invoices', year)
@@ -45,6 +47,16 @@ const selectedPeriodLabel = computed(() => {
   return monthLabel(periodFileLabel.value)
 })
 
+watch(format, value => {
+  if (value !== 'pdf-zip') {
+    mergePdf.value = false
+    signPdf.value = false
+  }
+})
+watch(mergePdf, value => {
+  if (!value) signPdf.value = false
+})
+
 async function downloadExport() {
   downloading.value = true
   error.value = ''
@@ -62,6 +74,8 @@ async function downloadExport() {
       params.set('month', String(monthParts.value.month))
     }
     if (type.value) params.set('type', type.value)
+    if (format.value === 'pdf-zip' && mergePdf.value) params.set('merge_pdf', '1')
+    if (format.value === 'pdf-zip' && mergePdf.value && signPdf.value) params.set('sign_pdf', '1')
     const url = `/api/admin/export?${params.toString()}`
 
     // fetch + Blob → trigger download. Posíláme X-Supplier-Id explicitně (není to axios).
@@ -77,7 +91,9 @@ async function downloadExport() {
     const blob = await resp.blob()
     const dispo = resp.headers.get('Content-Disposition') || ''
     const m = dispo.match(/filename="?([^"]+)"?/)
-    const ext = ['pohoda', 'stereo'].includes(format.value) ? 'xml' : (format.value === 'isdoc' ? 'isdoc' : 'zip')
+    const ext = ['pohoda', 'stereo'].includes(format.value)
+      ? 'xml'
+      : (format.value === 'isdoc' ? 'isdoc' : (mergePdf.value ? 'pdf' : 'zip'))
     const filename = m ? m[1] : `myinvoice-${periodFileLabel.value}.${ext}`
 
     const a = document.createElement('a')
@@ -142,6 +158,25 @@ const monthLabel = (m: string): string => {
             <p class="text-xs text-neutral-500 mt-1">{{ opt.hint }}</p>
           </label>
         </div>
+      </div>
+
+      <div v-if="format === 'pdf-zip'" class="rounded-md border border-neutral-200 bg-neutral-50 p-3 space-y-3">
+        <label class="flex items-start gap-3 cursor-pointer">
+          <input v-model="mergePdf" type="checkbox"
+            class="mt-0.5 w-4 h-4 rounded border-neutral-300 text-primary-600 focus:ring-primary-500" />
+          <span>
+            <span class="block text-sm font-medium text-neutral-800">{{ t('export.merge_pdf') }}</span>
+            <span class="block text-xs text-neutral-500 mt-0.5">{{ t('export.merge_pdf_hint') }}</span>
+          </span>
+        </label>
+        <label v-if="mergePdf" class="flex items-start gap-3 cursor-pointer border-t border-neutral-200 pt-3">
+          <input v-model="signPdf" type="checkbox"
+            class="mt-0.5 w-4 h-4 rounded border-neutral-300 text-primary-600 focus:ring-primary-500" />
+          <span>
+            <span class="block text-sm font-medium text-neutral-800">{{ t('export.sign_merged_pdf') }}</span>
+            <span class="block text-xs text-neutral-500 mt-0.5">{{ t('export.sign_merged_pdf_hint') }}</span>
+          </span>
+        </label>
       </div>
 
       <!-- Období -->

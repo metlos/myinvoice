@@ -214,7 +214,7 @@ const projectActions = computed<ActionItem[]>(() => {
           </span>
         </li>
       </ul>
-      <p class="text-xs text-neutral-400 mt-2">{{ t('project.client_main_email_note', { email: project.client_main_email }) }}</p>
+      <p v-if="project.client_main_email" class="text-xs text-neutral-400 mt-2">{{ t('project.client_main_email_note', { email: project.client_main_email }) }}</p>
     </div>
 
     <div v-if="project.note" class="bg-surface border border-neutral-200 rounded-lg p-5 shadow-sm">

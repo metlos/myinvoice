@@ -58,7 +58,7 @@ final class AiPdfExtractor
      *               error?:string, ai_data?:array<string,mixed>, model?:string,
      *               usage?:array<string,int>}
      */
-    public function extractAndCreate(int $supplierId, int $userId, string $pdfBytes, ?string $modelOverride = null, ?string $originalFilename = null): array
+    public function extractAndCreate(int $supplierId, int $userId, string $pdfBytes, ?string $modelOverride = null, ?string $originalFilename = null, ?string $importBatchId = null): array
     {
         // ISDOCX balíček (ZIP s vnitřním .isdoc + čitelným PDF) nahraný napřímo →
         // deterministický import přes ISDOC parser (0 AI cost), PDF z balíčku archivujeme.
@@ -67,7 +67,7 @@ final class AiPdfExtractor
             $pkg = (new IsdocxExtractor())->unwrap($pdfBytes);
             if ($pkg !== null) {
                 // $pdfBytes = ORIGINÁLNÍ .isdocx (předáme dál k archivaci as-is).
-                return $this->createFromIsdocx($pkg, $supplierId, $userId, $originalFilename, $pdfBytes);
+                return $this->createFromIsdocx($pkg, $supplierId, $userId, $originalFilename, $pdfBytes, $importBatchId);
             }
         }
 
@@ -118,6 +118,7 @@ final class AiPdfExtractor
                     $this->pdfArchiver->archiveSourceBytes(
                         (int) $r['purchase_invoice_id'], $supplierId, $isdocXml, $srcName, 'isdoc',
                     );
+                    $this->tagImportBatch((int) $r['purchase_invoice_id'], $supplierId, $importBatchId);
                     return [
                         'ok'                  => true,
                         'purchase_invoice_id' => $r['purchase_invoice_id'],
@@ -247,10 +248,15 @@ final class AiPdfExtractor
             $invoiceId = $this->createDraft($data, $supplierId, $userId, $resolved['id'], $resolved['is_vat_payer'] ?? null);
             // Attach PDF — uložit do archive a updatnout pdf_path/hash/size na faktuře
             $this->attachPdf($invoiceId, $supplierId, $pdfBytes, $originalFilename);
+            $this->tagImportBatch($invoiceId, $supplierId, $importBatchId);
             return [
                 'ok'                  => true,
                 'purchase_invoice_id' => $invoiceId,
                 'vendor_id'           => $resolved['id'],
+                'vendor_name'         => (string) ($resolved['company_name'] ?? ($data['vendor']['company_name'] ?? '')),
+                'document_kind'       => $this->normalizeDocumentKind((string) ($data['document_kind'] ?? 'invoice')),
+                'total_with_vat'      => isset($data['total_with_vat']) ? (float) $data['total_with_vat'] : null,
+                'currency'            => (string) ($data['currency'] ?? ''),
                 'source'              => 'ai',
                 'model'               => $extracted['model'] ?? null,
                 'usage'               => $extracted['usage'] ?? null,
@@ -275,7 +281,7 @@ final class AiPdfExtractor
      * @param array{isdoc:string, isdoc_name:string, pdf:?string, pdf_name:?string} $pkg
      * @return array{ok:bool, purchase_invoice_id?:int, vendor_id?:int, source:string, error?:string, duplicate?:bool, message?:string}
      */
-    private function createFromIsdocx(array $pkg, int $supplierId, int $userId, ?string $originalFilename, ?string $isdocxBytes = null): array
+    private function createFromIsdocx(array $pkg, int $supplierId, int $userId, ?string $originalFilename, ?string $isdocxBytes = null, ?string $importBatchId = null): array
     {
         $innerPdf = $pkg['pdf'];
 
@@ -327,12 +333,29 @@ final class AiPdfExtractor
             );
         }
 
+        $this->tagImportBatch((int) $r['purchase_invoice_id'], $supplierId, $importBatchId);
         return [
             'ok'                  => true,
             'purchase_invoice_id' => (int) $r['purchase_invoice_id'],
             'vendor_id'           => $r['vendor_id'] ?? null,
             'source'              => 'isdocx',
         ];
+    }
+
+    /**
+     * Označí právě vytvořený doklad identifikátorem importní dávky (#232), pokud byl
+     * předán. Selhání je „nice to have" — doklad je už správně vytvořený.
+     */
+    private function tagImportBatch(int $invoiceId, int $supplierId, ?string $importBatchId): void
+    {
+        if ($importBatchId === null || $importBatchId === '') {
+            return;
+        }
+        try {
+            $this->repo->setImportBatchId($invoiceId, $supplierId, $importBatchId);
+        } catch (\Throwable) {
+            // ignore — dávkové označení není kritické
+        }
     }
 
     /**

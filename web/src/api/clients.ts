@@ -33,7 +33,7 @@ export interface Client {
   country_iso2: string
   /** Země klienta je členský stát EU — řídí auto-RC u identifikované osoby (#94). */
   country_is_eu?: boolean
-  main_email: string
+  main_email: string | null
   phone?: string | null
   language: 'cs' | 'en'
   currency_default_id: number
@@ -60,6 +60,7 @@ export interface Client {
   proforma_number_format?: string | null
   credit_note_number_format?: string | null
   invoice_number_period?: 'year' | 'month' | 'none' | null
+  default_branding_profile_id?: number | null
   archived_at?: string | null
   active_projects_count?: number
   invoices_count?: number
@@ -184,7 +185,7 @@ export interface ClientPayload {
   city: string
   zip: string
   country_iso2: string
-  main_email: string
+  main_email?: string | null
   phone?: string | null
   language: 'cs' | 'en'
   currency_default_id: number
@@ -205,6 +206,7 @@ export interface ClientPayload {
   proforma_number_format?: string | null
   credit_note_number_format?: string | null
   invoice_number_period?: 'year' | 'month' | 'none' | null
+  default_branding_profile_id?: number | null
   /** Replace-all (#86): pošli kompletní pole; vynech klíč, pokud kontakty neměníš. */
   email_contacts?: ClientEmailContact[]
 }

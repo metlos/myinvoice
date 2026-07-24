@@ -70,6 +70,47 @@ final class IsdocReceivedInvoiceSchemaTest extends TestCase
         self::assertSame('3049.20', $this->xpathOne($xml, '//i:LegalMonetaryTotal/i:TaxInclusiveAmount'));
     }
 
+    public function testPaymentVariableSymbolIsExportedSeparatelyFromDocumentId(): void
+    {
+        $xml = $this->exporter->buildXml($this->receivedInvoice([
+            'varsymbol'                => 'PF2606001',
+            'document_number'          => 'FV-2026-001',
+            'internal_document_number' => 'PF2606001',
+            'payment_variable_symbol'  => '2026001234',
+            'payment_constant_symbol'  => '0558',
+            'bank_snapshot'            => [
+                'account_number' => '1000000005',
+                'bank_code'      => '0100',
+                'bank_name'      => 'Komerční banka',
+            ],
+        ]));
+
+        $this->assertValidIsdoc($xml);
+        self::assertSame('FV-2026-001', $this->xpathOne($xml, '//i:Invoice/i:ID'));
+        self::assertSame('PF2606001', $this->xpathOne(
+            $xml, '//i:Extensions/myi:InternalDocumentNumber'));
+        self::assertSame('2026001234', $this->xpathOne(
+            $xml, '//i:PaymentMeans/i:Payment/i:Details/i:VariableSymbol'));
+        self::assertSame('0558', $this->xpathOne(
+            $xml, '//i:PaymentMeans/i:Payment/i:Details/i:ConstantSymbol'));
+    }
+
+    public function testPaymentVariableSymbolRemainsInPaidInvoice(): void
+    {
+        $xml = $this->exporter->buildXml($this->receivedInvoice([
+            'amount_to_pay'             => 0.0,
+            'payment_variable_symbol'   => '2026001234',
+            'bank_snapshot'             => [
+                'account_number' => '1000000005',
+                'bank_code'      => '0100',
+            ],
+        ]));
+
+        $this->assertValidIsdoc($xml);
+        self::assertSame('2026001234', $this->xpathOne(
+            $xml, '//i:PaymentMeans/i:Payment/i:Details/i:VariableSymbol'));
+    }
+
     public function testReceivedCreditNoteIsSchemaValid(): void
     {
         $this->assertValidIsdoc($this->exporter->buildXml($this->receivedInvoice(['invoice_type' => 'credit_note'])));
@@ -83,6 +124,7 @@ final class IsdocReceivedInvoiceSchemaTest extends TestCase
         $dom->loadXML($xml);
         $xp = new \DOMXPath($dom);
         $xp->registerNamespace('i', 'http://isdoc.cz/namespace/2013');
+        $xp->registerNamespace('myi', IsdocExporter::MYINVOICE_EXTENSION_NS);
         return $xp->query($expr)->item(0)?->textContent;
     }
 
@@ -121,6 +163,8 @@ final class IsdocReceivedInvoiceSchemaTest extends TestCase
             'id'                 => 1,
             'invoice_type'       => 'invoice',
             'varsymbol'          => '2026-VF-1',
+            'document_number'    => 'FV-2026-001',
+            'internal_document_number' => '2026-VF-1',
             'issue_date'         => '2026-06-03',
             'tax_date'           => '2026-06-03',
             'due_date'           => '2026-06-17',

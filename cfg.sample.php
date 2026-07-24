@@ -262,6 +262,7 @@ return [
         'ai_per_5min_per_user'      => 30,           // Anthropic AI extract + inbox scan (BYOK billing protection)
         'setup_per_hour_per_ip'     => 5,            // /setup wizard endpoint
         'approval_per_min_per_ip'   => 30,           // veřejné schvalování výkazu /api/public/approval/* (anon DoS)
+        'invoice_public_per_min_per_ip' => 60,       // veřejná web faktura /api/public/invoice/* (anon DoS: náhled + PDF + přílohy)
     ],
     'brute_force' => [
         // Progresivní obrana login formuláře. Počítá selhání per (email, IP) v posuvných oknech.

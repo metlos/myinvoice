@@ -4,13 +4,16 @@ declare(strict_types=1);
 
 namespace MyInvoice\Service\Validation;
 
+use MyInvoice\Service\Oss\OssPeriod;
+
 final class InvoiceValidation
 {
     /**
      * @param array<int, float>|null $vatRates
+     * @param array<int, string>|null $vatRateCountries sazba → stát, pro kontrolu zahraničních sazeb mimo OSS
      * @return array<string, string[]>
      */
-    public static function invoice(array $data, ?array $vatRates = null): array
+    public static function invoice(array $data, ?array $vatRates = null, ?array $vatRateCountries = null): array
     {
         $err = [];
 
@@ -54,6 +57,72 @@ final class InvoiceValidation
                     continue;
                 }
                 $err = array_merge($err, InvoiceAmountPolicy::validateItem($item, $i));
+
+                // Zahraniční sazba smí být jen na OSS řádku. Bez téhle kontroly by řádek s cizí
+                // sazbou zůstal v tuzemské evidenci (VatLedgerService) a podle prahu roku by se
+                // zařadil do české klasifikace — DE 19 % by se vykázalo na snížené sazbě DPHDP3.
+                if ($vatRateCountries !== null && empty($item['oss_applicable']) && !empty($item['vat_rate_id'])) {
+                    $rateCountry = $vatRateCountries[(int) $item['vat_rate_id']] ?? null;
+                    if ($rateCountry !== null && $rateCountry !== 'CZ') {
+                        $err["items.{$i}.vat_rate_id"][] = 'Zahraniční sazbu DPH lze použít jen na řádku v režimu OSS';
+                    }
+                }
+
+                if (!empty($item['oss_applicable'])) {
+                    $country = strtoupper(trim((string) ($item['oss_consumer_country'] ?? '')));
+                    if (!preg_match('/^[A-Z]{2}$/', $country)) {
+                        $err["items.{$i}.oss_consumer_country"][] = 'Země spotřeby musí být dvoupísmenný ISO kód';
+                    }
+
+                    $rateType = (string) ($item['oss_rate_type'] ?? '');
+                    if (!in_array($rateType, ['standard', 'reduced', 'second_reduced', 'parking'], true)) {
+                        $err["items.{$i}.oss_rate_type"][] = 'Neplatný typ OSS sazby';
+                    }
+                    $supplyType = (string) ($item['oss_supply_type'] ?? '');
+                    if (!in_array($supplyType, ['goods', 'services'], true)) {
+                        $err["items.{$i}.oss_supply_type"][] = 'Typ OSS plnění musí být zboží nebo služba';
+                    }
+
+                    $rateValue = $item['oss_exchange_rate'] ?? null;
+                    if ($rateValue !== null && $rateValue !== '') {
+                        if (!is_numeric($rateValue) || !is_finite((float) $rateValue)
+                            || (float) $rateValue <= 0 || (float) $rateValue > 1000000
+                        ) {
+                            $err["items.{$i}.oss_exchange_rate"][] = 'OSS kurz musí být kladné číslo v podporovaném rozsahu';
+                        }
+                    }
+                    $rateDate = (string) ($item['oss_exchange_rate_date'] ?? '');
+                    if ($rateDate !== '' && !self::isValidDate($rateDate)) {
+                        $err["items.{$i}.oss_exchange_rate_date"][] = 'Neplatné datum OSS kurzu';
+                    }
+
+                    $manualAmounts = [];
+                    foreach (['oss_taxable_amount_return', 'oss_vat_amount_return'] as $field) {
+                        $value = $item[$field] ?? null;
+                        $manualAmounts[$field] = $value !== null && $value !== '';
+                        if ($manualAmounts[$field]
+                            && (!is_numeric($value) || !is_finite((float) $value) || abs((float) $value) > 999999999999.99)
+                        ) {
+                            $err["items.{$i}.{$field}"][] = 'OSS částka je mimo podporovaný rozsah';
+                        }
+                    }
+                    if ($manualAmounts['oss_taxable_amount_return'] !== $manualAmounts['oss_vat_amount_return']) {
+                        $err["items.{$i}.oss_taxable_amount_return"][] = 'Ruční OSS základ a DPH musí být vyplněny společně';
+                    }
+
+                    $originalPeriod = strtoupper(trim((string) ($item['oss_original_period'] ?? '')));
+                    if ($originalPeriod !== '') {
+                        if (!preg_match('/^[0-9]{4}Q[1-4]$/', $originalPeriod) || $originalPeriod < '2021Q3') {
+                            $err["items.{$i}.oss_original_period"][] = 'Původní OSS období musí být ve formátu RRRRQn a nejdříve Q3 2021';
+                        } else {
+                            $taxDate = (string) ($data['tax_date'] ?? $data['issue_date'] ?? '');
+                            $currentPeriod = OssPeriod::quarterCode($taxDate);
+                            if ($currentPeriod !== null && $originalPeriod >= $currentPeriod) {
+                                $err["items.{$i}.oss_original_period"][] = 'Původní OSS období musí předcházet období dokladu';
+                            }
+                        }
+                    }
+                }
             }
         }
 

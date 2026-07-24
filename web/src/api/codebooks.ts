@@ -50,8 +50,10 @@ export const codebooksApi = {
     api.get<Currency[]>('/codebooks/currencies', {
       params: includeInactive ? { include_inactive: 1 } : undefined,
     }).then((r) => r.data),
-  vatRates:   (country = 'CZ') =>
-    api.get<VatRate[]>('/codebooks/vat-rates', { params: { country } }).then((r) => r.data),
+  vatRates:   (country = 'CZ', activeOn?: string) =>
+    api.get<VatRate[]>('/codebooks/vat-rates', {
+      params: { country, ...(activeOn ? { active_on: activeOn } : {}) },
+    }).then((r) => r.data),
   units:      () => api.get<Unit[]>('/codebooks/units').then((r) => r.data),
   years:      () =>
     api.get<{ invoices: number[]; purchase_invoices: number[]; combined: number[] }>('/codebooks/years')

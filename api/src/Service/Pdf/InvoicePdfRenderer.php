@@ -119,17 +119,7 @@ final class InvoicePdfRenderer
 
         $rendered = $this->renderHtmlAndCss($invoice, $isdocXml !== null);
 
-        $mpdf = new Mpdf([
-            'mode'              => 'utf-8',
-            'format'            => 'A4',
-            'margin_top'        => 15,
-            'margin_bottom'     => 18,
-            'margin_left'       => 12,
-            'margin_right'      => 12,
-            'tempDir'           => $tmpDir,
-            'autoPageBreak'     => true,
-            ...MpdfFontConfig::options(),
-        ]);
+        $mpdf = $this->newMpdf($tmpDir);
         // PDF metadata — bez Title/Author, aby Chrome viewer nezobrazoval text nad PDF.
         $mpdf->SetTitle('');
         $mpdf->SetAuthor('');
@@ -185,6 +175,40 @@ final class InvoicePdfRenderer
     }
 
     /**
+     * Vyrenderuje pouze samotnou fakturu do zadaného dočasného souboru.
+     *
+     * Výstup záměrně neobsahuje ISDOC ani výkaz práce a nikdy se zde nepodepisuje.
+     * Používá ho hromadný tisk, který jednotlivé dokumenty nejprve spojí a případný
+     * elektronický podpis aplikuje až na výsledný celek.
+     */
+    public function renderUnsignedInvoiceOnly(int $invoiceId, string $outputPath): void
+    {
+        $invoice = $this->repo->find($invoiceId);
+        if ($invoice === null) {
+            throw new \RuntimeException("Faktura #{$invoiceId} nenalezena");
+        }
+
+        $tmpDir = \MyInvoice\Infrastructure\Config\RuntimePaths::storage('cache/mpdf');
+        if (!is_dir($tmpDir)) {
+            @mkdir($tmpDir, 0755, true);
+        }
+        if (!is_dir(dirname($outputPath))) {
+            @mkdir(dirname($outputPath), 0755, true);
+        }
+
+        $rendered = $this->renderHtmlAndCss($invoice, false, false);
+        $mpdf = $this->newMpdf($tmpDir);
+        $mpdf->SetTitle('');
+        $mpdf->SetAuthor('');
+        $mpdf->SetCreator('MyInvoice.cz');
+        if ($rendered['css'] !== '') {
+            $mpdf->WriteHTML($rendered['css'], \Mpdf\HTMLParserMode::HEADER_CSS);
+        }
+        $mpdf->WriteHTML($rendered['body'], \Mpdf\HTMLParserMode::HTML_BODY);
+        $mpdf->Output($outputPath, \Mpdf\Output\Destination::FILE);
+    }
+
+    /**
      * ISDOC se přiloží jen pro CZK faktury dodavatele s embed_isdoc=1.
      * Drafty bez varsymbolu skipujeme — buildXml() by vyrobil placeholder
      * "DRAFT-{id}" jako ID, což účetní SW odmítne.
@@ -201,21 +225,38 @@ final class InvoicePdfRenderer
     /**
      * @return array{body:string, css:string}
      */
-    public function renderHtmlAndCss(array $invoice, bool $hasIsdocAttachment = false): array
+    public function renderHtmlAndCss(
+        array $invoice,
+        bool $hasIsdocAttachment = false,
+        bool $includeWorkReport = true,
+    ): array
     {
         $cssPath = Bootstrap::rootDir() . '/styles/invoice.css';
         $css = is_file($cssPath) ? (string) file_get_contents($cssPath) : '';
         // Per-supplier branding barva — přebarví fialové akcenty na zvolený odstín.
         $css .= $this->brandAccentCss($this->resolveSupplier($invoice));
         // Renderuj template BEZ inline <style> bloku — CSS pošleme do mPDF zvlášť
-        $body = $this->renderHtml($invoice, includeCss: false, hasIsdocAttachment: $hasIsdocAttachment);
+        $body = $this->renderHtml(
+            $invoice,
+            includeCss: false,
+            hasIsdocAttachment: $hasIsdocAttachment,
+            includeWorkReport: $includeWorkReport,
+        );
         return ['body' => $body, 'css' => $css];
     }
 
-    public function renderHtml(array $invoice, bool $includeCss = true, bool $hasIsdocAttachment = false): string
+    public function renderHtml(
+        array $invoice,
+        bool $includeCss = true,
+        bool $hasIsdocAttachment = false,
+        bool $includeWorkReport = true,
+    ): string
     {
         // Použij snapshots pokud jsou (issued+), jinak živá data
         $supplierData = $this->resolveSupplier($invoice);
+        if (($invoice['status'] ?? 'draft') === 'draft' || empty($invoice['supplier_snapshot'])) {
+            $supplierData = $this->applyLiveBrandingProfile($supplierData, $invoice);
+        }
         $clientData   = $this->resolveClient($invoice);
         $bankData     = $this->resolveBank($invoice);
 
@@ -247,7 +288,9 @@ final class InvoicePdfRenderer
 
         $locale = $invoice['language'] ?? 'cs';
         $cssPath = Bootstrap::rootDir() . '/styles/invoice.css';
-        $css = $includeCss && is_file($cssPath) ? (string) file_get_contents($cssPath) : '';
+        $css = $includeCss
+            ? (is_file($cssPath) ? (string) file_get_contents($cssPath) : '')
+            : '';
         if ($includeCss && $css !== '') {
             $css .= $this->brandAccentCss($supplierData);
         }
@@ -261,7 +304,7 @@ final class InvoicePdfRenderer
 
         $logoPath = $this->resolveLogoPath($supplierData, (int) ($invoice['supplier_id'] ?? 0));
 
-        return $twig->render('invoice.twig', [
+        $vars = [
             'invoice'           => $invoice,
             'supplier'          => $supplierData,
             'client'            => $clientData,
@@ -277,7 +320,9 @@ final class InvoicePdfRenderer
             'doc_type_label'    => $this->docTypeLabel($invoice, $locale, $supplierData),
             'doc_title'         => $this->docTitle($invoice),
             'parent_varsymbol'  => $this->parentVarsymbol($invoice),
-            'work_report'       => $this->workReports->findByInvoice((int) $invoice['id']),
+            'work_report'       => $includeWorkReport
+                ? $this->workReports->findByInvoice((int) $invoice['id'])
+                : null,
             'date_format'       => $locale === 'en' ? 'M j, Y' : 'j. n. Y',
             'decimal_sep'       => $locale === 'en' ? '.' : ',',
             // Nezlomitelná mezera (NBSP, U+00A0) jako oddělovač tisíců — mPDF v úzkých
@@ -290,6 +335,22 @@ final class InvoicePdfRenderer
             // reálně je — bez loga se název ukazuje vždy (textový brand-name fallback).
             'logo_show_name'    => $logoPath !== null && !empty($supplierData['pdf_logo_show_name']),
             'isdoc_attachment'  => $hasIsdocAttachment, // bool — badge gate
+        ];
+        return $twig->render('invoice.twig', $vars);
+    }
+
+    private function newMpdf(string $tmpDir): Mpdf
+    {
+        return new Mpdf([
+            'mode'              => 'utf-8',
+            'format'            => 'A4',
+            'margin_top'        => 15,
+            'margin_bottom'     => 18,
+            'margin_left'       => 12,
+            'margin_right'      => 12,
+            'tempDir'           => $tmpDir,
+            'autoPageBreak'     => true,
+            ...MpdfFontConfig::options(),
         ]);
     }
 
@@ -350,7 +411,31 @@ final class InvoicePdfRenderer
         ]);
     }
 
-    private function resolveSupplier(array $invoice): array
+    /** @param array<string,mixed> $supplier @param array<string,mixed> $invoice */
+    private function applyLiveBrandingProfile(array $supplier, array $invoice): array
+    {
+        if (empty($invoice['branding_profile_id'])) return $supplier;
+        $stmt = $this->db->pdo()->prepare(
+            'SELECT bp.* FROM supplier s
+               JOIN branding_profiles bp ON bp.id = ?
+                                        AND bp.supplier_id = s.id AND bp.is_active = 1
+              WHERE s.id = ? AND s.branding_profiles_enabled = 1'
+        );
+        $stmt->execute([
+            (int) $invoice['branding_profile_id'],
+            (int) ($invoice['supplier_id'] ?? 0),
+        ]);
+        $profile = $stmt->fetch(\PDO::FETCH_ASSOC);
+        if ($profile === false) return $supplier;
+        return \MyInvoice\Service\Branding\BrandingProfileOverlay::apply($supplier, $profile);
+    }
+
+    /**
+     * resolveSupplier/resolveClient/resolveBank jsou public — kromě PDF renderu
+     * je používá i veřejná web faktura (PublicInvoiceGetAction), aby HTML náhled
+     * ukazoval STEJNÁ data jako PDF (snapshot-first s defensive merge).
+     */
+    public function resolveSupplier(array $invoice): array
     {
         $live = $this->getSupplierData((int) ($invoice['supplier_id'] ?? 0));
         if (!empty($invoice['supplier_snapshot'])) {
@@ -365,7 +450,7 @@ final class InvoicePdfRenderer
         return $live;
     }
 
-    private function resolveClient(array $invoice): array
+    public function resolveClient(array $invoice): array
     {
         // Defensive merge: snapshot je primární (historický stav), live data
         // doplní chybějící klíče. Bez merge by legacy/cizí snapshoty (import
@@ -389,7 +474,7 @@ final class InvoicePdfRenderer
         return $live;
     }
 
-    private function resolveBank(array $invoice): ?array
+    public function resolveBank(array $invoice): ?array
     {
         // Live data z currencies (account/bank/IBAN/BIC podle currency_id).
         // Stejný defensive-merge pattern jako u supplier/client — snapshot vyhrává,
@@ -599,6 +684,7 @@ final class InvoicePdfRenderer
                 (int) $invoice['client_id'],
                 (int) $invoice['currency_id'],
                 (int) ($invoice['supplier_id'] ?? 0),
+                isset($invoice['branding_profile_id']) ? (int) $invoice['branding_profile_id'] : null,
             );
         } catch (\Throwable) {
             // Pokud klient/dodavatel neexistuje (smazaný), zachovej původní snapshot.

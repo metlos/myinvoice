@@ -62,6 +62,15 @@ POST  /api/invoices/bulk-reminder
 # Work reports
 GET/PUT/DELETE  /api/invoices/{id}/work-report
 
+# Price list (interní session API; správa admin, čtení accountant)
+GET/POST  /api/price-list-items
+GET/PUT/DELETE  /api/price-list-items/{id}
+GET       /api/price-list-items/{id}/resolve
+GET       /api/price-list-items/{id}/prices
+PUT/DELETE /api/price-list-items/{id}/prices/{currencyCode}
+GET       /api/price-list-items/{id}/customer-overrides
+PUT/DELETE /api/price-list-items/{id}/customer-overrides/{clientId}/{currencyCode}
+
 # Schvalování výkazu zákazníkem
 POST /api/invoices/{id}/request-approval
 POST /api/invoices/{id}/request-approval-test
@@ -144,7 +153,7 @@ POST /api/bank-transactions/{id}/ignore
     "code": "validation_failed",
     "message": "Validace selhala",
     "fields": {
-      "main_email": ["Email je povinný"],
+      "main_email": ["Hlavní email musí být platný"],
       "ic": ["IČO musí mít 8 číslic"]
     }
   }

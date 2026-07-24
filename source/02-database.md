@@ -20,6 +20,10 @@ supplier ─── supplier_bank_accounts
    │
 clients ─── client_billing_emails
    │
+   ├── price_list_customer_overrides ── price_list_items ── price_list_item_prices
+   │                                      │
+   │                                      └── recurring_invoice_template_items
+   │
    └── projects ── invoices ── invoice_items
                        │
                        └── work_reports ── work_report_items
@@ -35,6 +39,22 @@ ares_cache, vies_cache
 invoice_counters
 settings (key/value)
 ```
+
+## Ceníkové položky
+
+`price_list_items` obsahuje ceník oddělený podle `supplier_id`. Kód položky je
+unikátní v rámci dodavatele, základní měna je ISO kód a režim
+`prices_include_vat` určuje interpretaci všech jejích cen.
+
+`price_list_item_prices` ukládá nejvýše jednu explicitní cenu položky pro každou
+měnu dodavatele. `price_list_customer_overrides` přidává přednostní cenu pro
+konkrétního zákazníka a měnu. Obě tabulky používají tenant klíč `supplier_id` a
+vazbu na ceníkovou položku.
+
+`recurring_invoice_template_items.price_list_item_id` je volitelná trvalá vazba
+šablony na ceník. `catalog_policy` rozlišuje fixní snapshot (`fixed`), aktuální
+cenu (`current`) a změnu vyžadující kontrolu (`review_required`). Ostatní
+`catalog_*` sloupce uchovávají zdroj a kurz schváleného snapshotu.
 
 ## Migrace
 
@@ -127,7 +147,7 @@ CREATE TABLE login_attempts (
 
 ```sql
 CREATE TABLE supplier (
-  id                       TINYINT UNSIGNED PRIMARY KEY DEFAULT 1, -- vždy 1 řádek
+  id                       INT UNSIGNED AUTO_INCREMENT PRIMARY KEY,
   company_name             VARCHAR(190) NOT NULL,
   display_name             VARCHAR(190) NULL,        -- pro OSVČ "Jméno Příjmení"
   street                   VARCHAR(190) NOT NULL,
@@ -196,7 +216,7 @@ CREATE TABLE clients (
 
 ## 8. `project_billing_emails`
 
-Fakturační emaily jsou na úrovni **zakázky**, ne klienta — každá zakázka může mít vlastní účetní/PM/asistentku. Klient má jen `main_email` (povinný hlavní kontakt).
+Fakturační emaily jsou na úrovni **zakázky**, ne klienta — každá zakázka může mít vlastní účetní/PM/asistentku. Klient má volitelný `main_email` jako hlavní kontakt.
 
 Při odeslání faktury: `client.main_email + project_billing_emails[]`. Pokud faktura nemá `project_id`, jdou maily jen na `client.main_email`.
 

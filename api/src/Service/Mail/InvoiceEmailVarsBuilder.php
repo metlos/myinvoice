@@ -6,6 +6,7 @@ namespace MyInvoice\Service\Mail;
 
 use MyInvoice\Infrastructure\Database\Connection;
 use MyInvoice\Service\Branding\AccentColor;
+use MyInvoice\Service\Invoice\InvoicePublicLinkService;
 use MyInvoice\Service\Qr\QrPaymentGenerator;
 
 /**
@@ -17,6 +18,7 @@ final class InvoiceEmailVarsBuilder
     public function __construct(
         private readonly Connection $db,
         private readonly QrPaymentGenerator $qr,
+        private readonly InvoicePublicLinkService $publicLinks,
     ) {}
 
     /**
@@ -54,7 +56,7 @@ final class InvoiceEmailVarsBuilder
             ),
             'days_overdue'   => $daysOverdue,
             'subject'        => $subject,
-            'qr_data_uri'    => $this->generateQr($invoice),
+            'qr_data_uri'    => $this->paymentQrDataUri($invoice),
             'supplier'       => $this->loadSupplierFooter($invoice),
             'is_test'        => false,
             'is_paid'        => ($invoice['status'] ?? '') === 'paid',
@@ -111,14 +113,22 @@ final class InvoiceEmailVarsBuilder
             'amount_to_pay'  => $amount,
             'is_test'        => $isTest,
             'subject'        => $this->buildSubject($invoice, $isTest, $locale),
-            'qr_data_uri'    => $this->generateQr($invoice),
+            'qr_data_uri'    => $this->paymentQrDataUri($invoice),
             'supplier'       => $this->loadSupplierFooter($invoice),
             'is_paid'        => ($invoice['status'] ?? '') === 'paid',
             'payment_method' => (string) ($invoice['payment_method'] ?? 'bank_transfer'),
+            // Trvalý odkaz na web fakturu do e-mailu; token vzniká lazy při
+            // prvním odeslání. Null pro draft (test e-mail) a bez app.url.
+            'public_url'     => $this->publicLinks->ensureUrl($invoice),
         ];
     }
 
-    private function generateQr(array $invoice): ?string
+    /**
+     * QR platba pro zbývající částku — public: kromě e-mailů ho používá i veřejná
+     * web faktura (PublicInvoiceGetAction). Bank z snapshot (issued+) nebo live
+     * z currencies; null když není co platit / jiná platební metoda.
+     */
+    public function paymentQrDataUri(array $invoice): ?string
     {
         // QR na zbývající částku — po částečné úhradě (#89) se platí jen zbytek.
         $remaining = round((float) ($invoice['amount_to_pay'] ?? 0) - (float) ($invoice['paid_total'] ?? 0), 2);
@@ -232,6 +242,12 @@ final class InvoiceEmailVarsBuilder
                     'email'        => $snap['email'] ?? null,
                     'phone'        => $snap['phone'] ?? null,
                     'web'          => $snap['web'] ?? null,
+                    'email_footer' => $snap['email_footer'] ?? null,
+                    'branding_profile_id' => $snap['branding_profile_id'] ?? null,
+                    'email_branding_enabled' => (bool) ($snap['email_branding_enabled'] ?? false),
+                    'email_accent_color' => $snap['email_accent_color'] ?? '#3B2D83',
+                    'logo_path' => $snap['logo_path'] ?? null,
+                    'email_profile_id' => $snap['email_profile_id'] ?? null,
                 ];
             }
         }
@@ -255,24 +271,27 @@ final class InvoiceEmailVarsBuilder
             $row['id'] = $sid;
         }
 
-        // 3. Branding (logo, accent color, toggle) — vždy LIVE z aktuálního supplier,
-        //    nepatří do snapshotu, protože reprezentuje současnou identitu firmy.
+        // 3. Vystavený doklad používá immutable branding ze snapshotu. U draftu
+        //    načteme explicitní profil, případně výchozí profil dodavatele.
         if ($row !== null && $sid > 0) {
-            $bStmt = $this->db->pdo()->prepare(
-                'SELECT email_branding_enabled, email_accent_color, logo_path
-                   FROM supplier WHERE id = ?'
-            );
-            $bStmt->execute([$sid]);
-            $br = $bStmt->fetch(\PDO::FETCH_ASSOC);
-            if ($br !== false) {
-                $row['email_branding_enabled'] = (bool) $br['email_branding_enabled'];
-                $row['email_accent_color']     = (string) ($br['email_accent_color'] ?: '#3B2D83');
-                $row['logo_path']              = $br['logo_path'] ?: null;
-                $row['accent_soft']            = AccentColor::emailBackground(
-                    $row['email_branding_enabled'],
-                    $row['email_accent_color'],
+            $hasSnapshotProfile = !empty($row['branding_profile_id']);
+            if (!$hasSnapshotProfile && !empty($invoice['branding_profile_id'])) {
+                $profileId = (int) $invoice['branding_profile_id'];
+                $bStmt = $this->db->pdo()->prepare(
+                    'SELECT bp.* FROM supplier s
+                       JOIN branding_profiles bp ON bp.id = ?
+                                                AND bp.supplier_id = s.id AND bp.is_active = 1
+                      WHERE s.id = ? AND s.branding_profiles_enabled = 1'
                 );
+                $bStmt->execute([$profileId, $sid]);
+                $br = $bStmt->fetch(\PDO::FETCH_ASSOC);
+                if ($br !== false) {
+                    $row = \MyInvoice\Service\Branding\BrandingProfileOverlay::apply($row, $br);
+                }
             }
+            $row['email_branding_enabled'] = (bool) ($row['email_branding_enabled'] ?? false);
+            $row['email_accent_color'] = (string) ($row['email_accent_color'] ?? '#3B2D83');
+            $row['accent_soft'] = AccentColor::emailBackground($row['email_branding_enabled'], $row['email_accent_color']);
         }
 
         return $row;

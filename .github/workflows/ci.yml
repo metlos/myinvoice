@@ -70,6 +70,10 @@ jobs:
         working-directory: web
         run: pnpm exec vue-tsc --noEmit
 
+      - name: PWA service worker tests
+        working-directory: web
+        run: pnpm test:pwa
+
       - name: Production build
         working-directory: web
         run: pnpm build

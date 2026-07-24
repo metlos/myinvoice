@@ -112,6 +112,73 @@ final class CnbExchangeRateClient
     }
 
     /**
+     * Vrátí všechny požadované kurzy z jednoho kurzového dne.
+     *
+     * @param list<string> $currencyCodes
+     * @return array{
+     *   rates: array<string,float>,
+     *   rate_date: string,
+     *   fallback_used: bool,
+     *   source: 'cache'|'fresh'|'last_known'
+     * }|null
+     */
+    public function getRatesForCommonDate(array $currencyCodes, DateTimeImmutable $date): ?array
+    {
+        $codes = array_values(array_unique(array_filter(array_map(
+            static fn (string $code): string => strtoupper(trim($code)),
+            $currencyCodes,
+        ), static fn (string $code): bool => $code !== '' && $code !== 'CZK')));
+
+        if ($codes === []) {
+            return [
+                'rates' => [],
+                'rate_date' => $date->format('Y-m-d'),
+                'fallback_used' => false,
+                'source' => 'cache',
+            ];
+        }
+
+        for ($i = 0; $i <= self::FALLBACK_DAYS; $i++) {
+            $tryDate = $date->modify('-' . $i . ' day');
+            $tryStr = $tryDate->format('Y-m-d');
+
+            $cached = $this->ratesFromCache($codes, $tryStr);
+            if (count($cached) === count($codes)) {
+                return [
+                    'rates' => $cached,
+                    'rate_date' => $tryStr,
+                    'fallback_used' => $i > 0,
+                    'source' => 'cache',
+                ];
+            }
+
+            $rates = $this->fetchAndParse($tryDate);
+            if ($rates === null) continue;
+
+            $this->saveBatch($tryStr, $rates);
+            $selected = array_intersect_key($rates, array_flip($codes));
+            if (count($selected) === count($codes)) {
+                return [
+                    'rates' => array_map('floatval', $selected),
+                    'rate_date' => $tryStr,
+                    'fallback_used' => $i > 0,
+                    'source' => 'fresh',
+                ];
+            }
+        }
+
+        $latest = $this->latestCommonKnown($codes, $date->format('Y-m-d'));
+        if ($latest === null) return null;
+
+        return [
+            'rates' => $latest['rates'],
+            'rate_date' => $latest['rate_date'],
+            'fallback_used' => $latest['rate_date'] !== $date->format('Y-m-d'),
+            'source' => 'last_known',
+        ];
+    }
+
+    /**
      * Fetch + parse jednoho dne. Vrací map [CODE => rate_per_unit] nebo null pokud
      * feed nedostupný / 404 / parse selhal.
      *
@@ -204,6 +271,26 @@ final class CnbExchangeRateClient
     }
 
     /**
+     * @param list<string> $codes
+     * @return array<string,float>
+     */
+    private function ratesFromCache(array $codes, string $date): array
+    {
+        $placeholders = implode(',', array_fill(0, count($codes), '?'));
+        $stmt = $this->db->pdo()->prepare(
+            "SELECT currency_code, rate FROM exchange_rates
+              WHERE rate_date = ? AND currency_code IN ($placeholders)"
+        );
+        $stmt->execute(array_merge([$date], $codes));
+
+        $rates = [];
+        foreach ($stmt->fetchAll(\PDO::FETCH_ASSOC) as $row) {
+            $rates[(string) $row['currency_code']] = (float) $row['rate'];
+        }
+        return $rates;
+    }
+
+    /**
      * @param array<string, float> $rates
      */
     private function saveBatch(string $date, array $rates): void
@@ -237,5 +324,31 @@ final class CnbExchangeRateClient
             'rate'      => (float) $row['rate'],
             'rate_date' => (string) $row['rate_date'],
         ];
+    }
+
+    /**
+     * @param list<string> $codes
+     * @return array{rates:array<string,float>,rate_date:string}|null
+     */
+    private function latestCommonKnown(array $codes, string $notAfter): ?array
+    {
+        $placeholders = implode(',', array_fill(0, count($codes), '?'));
+        $stmt = $this->db->pdo()->prepare(
+            "SELECT rate_date
+               FROM exchange_rates
+              WHERE rate_date <= ? AND currency_code IN ($placeholders)
+              GROUP BY rate_date
+             HAVING COUNT(DISTINCT currency_code) = ?
+              ORDER BY rate_date DESC
+              LIMIT 1"
+        );
+        $stmt->execute(array_merge([$notAfter], $codes, [count($codes)]));
+        $rateDate = $stmt->fetchColumn();
+        if ($rateDate === false) return null;
+
+        $rates = $this->ratesFromCache($codes, (string) $rateDate);
+        if (count($rates) !== count($codes)) return null;
+
+        return ['rates' => $rates, 'rate_date' => (string) $rateDate];
     }
 }

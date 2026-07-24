@@ -10,6 +10,39 @@ aplikace:
 - **Activity log** — kdo co změnil
 - **Exporty** — viz [15. Exporty](15_Exporty.md)
 
+Správa opakovaně používaných fakturačních položek je kvůli návaznosti na
+vystavování dokladů v menu **Prodej → Ceník**.
+
+## Brandingové profily
+
+Brandingové profily jsou volitelný modul, který se zapíná v nastavení dodavatele.
+Dokud je vypnutý, faktury a e-maily používají původní údaje a branding dodavatele.
+Po zapnutí lze vytvořit profily pro různé obchodní značky. Profil může změnit
+logo, zobrazovaný název, slogan, barvu, kontaktní údaje a patičku e-mailu. Právní
+údaje dodavatele (firma, adresa, IČ a DIČ) zůstávají společné a profilem se nemění.
+
+Výchozí profil se použije vždy, když faktura, pravidelná fakturace ani zákazník
+neurčují jiný profil. Výchozí profil není povinný. Přepínač **Používat vlastní
+branding** v jednotlivém profilu řídí zobrazení jeho loga a barev v e-mailech i PDF.
+
+Každému profilu lze přiřadit také e-mailový profil odesílatele. Ten určuje
+SMTP účet, adresu odesílatele, Reply-To a případné podepisování zpráv. Není-li
+vybrán, použije se výchozí e-mailový profil dodavatele.
+
+E-mailový profil, který používá některý brandingový profil, nelze smazat.
+Chybová zpráva vypíše dotčené profily; nejprve jim nastav jiného odesílatele
+nebo výchozí profil dodavatele.
+
+Výchozí profil lze přiřadit zákazníkovi. Nový koncept faktury jej převezme a
+při vystavení se použitá identita uloží do snapshotu dokladu. Pozdější změna
+profilu nebo nahrání nového loga proto nezmění již vystavené faktury.
+
+Akce **Náhled e-mailu** u profilu zobrazí jeho logo, barvu, zobrazovaný název,
+kontakty i vlastní patičku. V náhledu lze přepínat mezi českou a anglickou
+variantou. Původní konfigurace brandingu e-mailů se používá při vypnutém modulu.
+Obsahové e-mailové šablony zůstávají společné pro dodavatele a spravují se
+odděleně na stránce **E-mail šablony**.
+
 ## 36.1 Číselníky
 
 **Systém → Číselníky**.
@@ -84,6 +117,34 @@ dodavateli), nahrazuje volný textový vstup za dropdown.
 > 🛈 **Auto-clean prázdných položek** — při uložení faktury se řádky bez
 > popisu i bez ceny tiše smažou. Můžeš tedy v editoru přidat víc řádků na
 > zásobu a nepoužité se neuloží.
+
+### 36.1.5 Ceníkové položky
+
+**Prodej → Ceník** (jen administrátor) spravuje ceník aktuálního dodavatele.
+Každá položka má kód, název, fakturační popis, jednotku, sazbu DPH a povinnou
+základní cenu v jedné měně. Kód je unikátní pouze v rámci dodavatele.
+Přehled lze prohledávat a filtrovat podle měny a aktivního či archivovaného
+stavu.
+
+Pro další aktivní měny lze zadat vlastní pevnou cenu. Když zapneš
+**Povolit přepočet kurzem ČNB**, chybějící měnová cena se dopočte ze základní
+ceny. Pevná cena v cílové měně má vždy přednost. Náhled ukazuje zdrojovou cenu,
+výslednou částku, křížový kurz a skutečné datum použitého kurzovního lístku.
+
+V sekci **Individuální ceny zákazníků** lze pro položku, zákazníka a měnu zadat
+odlišnou cenu. Pořadí použití je:
+
+1. individuální cena zákazníka v měně dokladu,
+2. obecná pevná cena v měně dokladu,
+3. individuální cena zákazníka v základní měně přepočtená kurzem,
+4. obecná základní cena přepočtená kurzem.
+
+U uložené individuální ceny se zobrazuje také počet opakovaných šablon daného
+zákazníka, které jsou na položku napojené.
+
+Ceníková položka určuje, zda jsou její ceny s DPH, nebo bez DPH. Do dokladu či
+šablony ji lze vložit jen při shodném režimu. Používaná položka se při smazání
+archivuje, aby zůstaly zachované vazby a pevné snapshoty šablon.
 
 ## 36.2 Uživatelé
 

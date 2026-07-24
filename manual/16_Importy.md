@@ -149,7 +149,7 @@ ISDOC přílohu". V tom případě:
 
 Alternativa k file uploadu: přímé volání iDoklad API v3 (OAuth2 Client Credentials).
 Vhodné pro většinu dat — táhne **kontakty + vystavené faktury + dobropisy + přijaté
-faktury + přijaté účtenky/paragony** najednou, po sekcích a rocích, s dry-run
+faktury + přijaté účtenky/paragony + bankovní pohyby** najednou, po sekcích a rocích, s dry-run
 preview a background jobem.
 
 ### 16.8.1 Získání API credentials
@@ -186,6 +186,29 @@ Na téže stránce, sekce **Spustit import**:
 
 Klikni **Spustit import**.
 
+Volba **Bankovní účty** synchronizuje číselník účtů z iDokladu a bezpečně jej
+mapuje na aktivní účty stejné měny v MyInvoice. Přesná shoda se propojí;
+neznámý nebo nejednoznačný účet se pouze označí ke kontrole. Synchronizace
+nikdy automaticky nezakládá ani nepřepisuje lokální bankovní účet.
+
+Volitelná sekce **Bankovní pohyby** načte pohyby až po synchronizaci dokladů.
+Importuje se jen účet, který je jednoznačně namapovaný na aktivní účet
+MyInvoice. Stabilní ID pohybu z iDokladu brání opakovanému vložení stejné
+transakce. Pokud je pohyb v iDokladu spárovaný s dokladem, MyInvoice použije
+jeho ID dokladu před běžným párováním podle variabilního symbolu.
+Při prvním importu se načtou všechny pohyby. Volba **Pouze změny od posledního
+importu** při dalších spuštěních načte jen pohyby s novějším ID, než má poslední
+uložený pohyb z iDokladu. Tento přírůstkový bod je nezávislý na importu faktur.
+Dry-run vypíše také počet přímých vazeb na již importované vydané faktury;
+vlastní párování ani platby nezapisuje.
+
+GPC nebo PDF výpis z banky je autoritativnější zdroj. Když stejná platba přijde
+také z iDokladu nebo e-mailového avíza, vazba na úhradu se převede na oficiální
+výpis a sekundární pohyb se označí jako ignorovaný. Pořadí importů proto
+nevytvoří dvojí úhradu. Automatické převzetí proběhne pouze při jediné shodě
+účtu, banky, měny, částky, data a VS (bez VS také protiúčtu); nejednoznačné
+případy zůstanou k ruční kontrole.
+
 ### 16.8.4 Co se importuje
 
 | Sekce | Co se vytvoří |
@@ -195,6 +218,13 @@ Klikni **Spustit import**.
 | **credit-notes** | `invoices` se `invoice_type='credit_note'` + parent link na původní fakturu (přes `parent_invoice_id`). |
 | **purchases** | `purchase_invoices` + `purchase_invoice_items`. Klient → `clients` s `is_vendor=true`. |
 | **receipts** | Přijaté **účtenky/paragony** (iDoklad `ReceivedReceipts`) → `purchase_invoices` s `document_kind='receipt'`. Účtenka nemá splatnost ani DUZP → `datum vystavení` = DUZP = splatnost. Hrazená na místě → importuje se rovnou jako **Zaplacená**. Hotovostní účtenka **bez dodavatele** viz poznámka níže. |
+| **bank transactions** | Bankovní pohyby (`BankStatements`) → bankovní výpisy a transakce; používají mapování účtů a bezpečnou deduplikaci proti GPC/PDF/IMAP. |
+
+U vydané faktury se bankovní účet přebírá z historických údajů `MyAddress`
+konkrétního dokladu (číslo účtu a kód banky). Pokud máš pro jednu měnu více
+účtů, import tak zachová účet skutečně uvedený na faktuře; výchozí účet měny se
+použije pouze tehdy, když doklad účet neobsahuje nebo jej nelze jednoznačně
+spárovat s aktivním účtem v MyInvoice.
 
 ### 16.8.5 Platební stav
 

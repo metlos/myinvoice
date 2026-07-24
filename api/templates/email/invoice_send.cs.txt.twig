@@ -22,6 +22,9 @@ Splatnost:         {{ invoice.due_date|date('j.n.Y') }}
 {% elseif payment_method == 'cash' %}>>> Úhrada v hotovosti.
 
 {% endif %}Faktura v PDF je v příloze tohoto emailu.
+{% if public_url %}
+Fakturu si můžete kdykoli zobrazit online: {{ public_url }}
+{% endif %}
 
 {% if not is_test %}Děkujeme za spolupráci.
 {% else %}=== TEST EMAIL — klient ho nedostal. ==={% endif %}

@@ -29,6 +29,7 @@ final class SouhrnneHlaseniAction
         private readonly ActivityLogger $logger,
         private readonly IpMatcher $ipMatcher,
         private readonly \MyInvoice\Service\Report\TaxSubmissionArchiver $archiver,
+        private readonly \MyInvoice\Service\Currency\MissingExchangeRateFiller $rateFiller,
     ) {}
 
     public function preview(Request $request, Response $response): Response
@@ -63,6 +64,18 @@ final class SouhrnneHlaseniAction
         }
         try {
             $result = $this->builder->build($supplierId, $year, $month, $period);
+            // #238: chybí-li u cizoměnných dokladů kurz, doplň z ČNB (oficiální kurz
+            // k DUZP) a přebuildi. Tvrdá chyba jen když ČNB kurz nezná ani po doplnění.
+            if (!empty($result['missing_rates'])) {
+                $this->rateFiller->fill($supplierId, $result['missing_rates']);
+                $result = $this->builder->build($supplierId, $year, $month, $period);
+                if (!empty($result['missing_rates'])) {
+                    $labels = \MyInvoice\Service\Report\VatLedgerService::missingExchangeRateLabels($result['missing_rates']);
+                    return Json::error($response, 'exchange_rate_missing',
+                        'Nelze vytvořit XML: ČNB nemá kurz pro doklady ' . implode(', ', $labels)
+                        . '. Doplňte kurz ručně u faktury a zkuste znovu.', 422);
+                }
+            }
         } catch (\Throwable $e) {
             return Json::error($response, 'build_failed', $e->getMessage(), 500);
         }

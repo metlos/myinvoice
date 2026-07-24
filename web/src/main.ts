@@ -12,3 +12,14 @@ app.use(router)
 app.use(i18n)
 app.directive('math', vMath)
 app.mount('#app')
+
+if (import.meta.env.PROD && 'serviceWorker' in navigator) {
+  window.addEventListener('load', () => {
+    navigator.serviceWorker.register('/service-worker.js', {
+      scope: '/',
+      updateViaCache: 'none',
+    }).catch((error) => {
+      console.error('Service worker registration failed:', error)
+    })
+  })
+}

@@ -142,6 +142,27 @@ final class VatClassificationMapperTest extends TestCase
         $this->assertSame([], $lines, 'Drafty se do DPHDP3 nezapočítávají');
     }
 
+    public function testOssSaleIsExcludedFromDomesticVatLedger(): void
+    {
+        $this->pdo->exec(
+            "INSERT INTO invoices
+                (id, supplier_id, client_id, varsymbol, issue_date, tax_date, currency_id,
+                 exchange_rate, reverse_charge, status, invoice_type, total_with_vat)
+             VALUES (10, 1, 200, 'OSS-TEST', '2026-05-20', '2026-05-20', 1,
+                     1, 0, 'issued', 'invoice', 119)"
+        );
+        $this->pdo->exec(
+            "INSERT INTO invoice_items
+                (id, invoice_id, vat_rate_snapshot, description, total_without_vat,
+                 total_vat, vat_classification_code, oss_applicable)
+             VALUES (10, 10, 19, 'OSS sale', 100, 19, '1', 1)"
+        );
+
+        $lines = $this->mapper->aggregateForDphPriznani(1, 2026, 5, 'monthly');
+
+        $this->assertSame([], $lines, 'OSS plneni nesmi vstoupit do tuzemskeho DPH priznani');
+    }
+
     public function testPerTenantOverrideWinsOverGlobal(): void
     {
         // Globální kód 40 → ř.40. Per-tenant override (supplier 1) ho přemapuje na ř.41.
@@ -262,7 +283,8 @@ final class VatClassificationMapperTest extends TestCase
             description TEXT NULL,
             total_without_vat REAL NOT NULL,
             total_vat REAL NOT NULL,
-            vat_classification_code TEXT NULL
+            vat_classification_code TEXT NULL,
+            oss_applicable INTEGER NOT NULL DEFAULT 0
         )");
     }
 

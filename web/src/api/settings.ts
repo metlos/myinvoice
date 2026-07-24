@@ -59,6 +59,7 @@ export interface Supplier {
   email_branding_enabled: boolean
   email_accent_color: string  // #RRGGBB
   pdf_logo_show_name: boolean // vedle loga v PDF zobrazit i název firmy (migrace 0058)
+  branding_profiles_enabled: boolean
   has_email_logo?: boolean    // server flag (existence storage/supplier-logos/sup-{id}.png)
   // Děkovný e-mail za úhradu (issue #57)
   payment_thanks_enabled: boolean
@@ -75,10 +76,14 @@ export interface Supplier {
   taxpayer_type?: 'fo' | 'po' | null
   vat_period?: 'monthly' | 'quarterly' | null
   flat_tax_band?: 'none' | 'band1' | 'band2' | 'band3' | null
+  oss_enabled?: boolean
+  oss_valid_from?: string | null
+  oss_valid_to?: string | null
+  oss_identification_country?: string | null
+  oss_return_currency?: string | null
   financial_office_code?: string | null
   workplace_code?: string | null
   cz_nace_code?: string | null
-  data_box_type?: string | null
   data_box_id?: string | null
   sest_jmeno?: string | null
   sest_prijmeni?: string | null
@@ -99,6 +104,26 @@ export interface Supplier {
     credit_note: string
     purchase: string
   }
+}
+
+export interface BrandingProfile {
+  id: number
+  supplier_id: number
+  name: string
+  display_name: string | null
+  tagline: string | null
+  email: string | null
+  reply_to: string | null
+  email_profile_id: number | null
+  phone: string | null
+  web: string | null
+  email_footer: string | null
+  logo_path: string | null
+  accent_color: string
+  branding_enabled: boolean
+  pdf_logo_show_name: boolean
+  is_active: boolean
+  is_default: boolean
 }
 
 export interface CurrencyAccount {
@@ -666,6 +691,26 @@ export const settingsApi = {
   },
   deleteEmailLogo: () => api.delete('/settings/email-branding/logo').then(r => r.data),
 
+  listBrandingProfiles: () =>
+    api.get<BrandingProfile[]>('/settings/branding-profiles').then(r => r.data),
+  createBrandingProfile: (payload: Partial<BrandingProfile>) =>
+    api.post<BrandingProfile>('/settings/branding-profiles', payload).then(r => r.data),
+  updateBrandingProfile: (id: number, payload: Partial<BrandingProfile>) =>
+    api.put<BrandingProfile>(`/settings/branding-profiles/${id}`, payload).then(r => r.data),
+  deleteBrandingProfile: (id: number) =>
+    api.delete<{ deleted: boolean }>(`/settings/branding-profiles/${id}`).then(r => r.data),
+  setDefaultBrandingProfile: (id: number) =>
+    api.post<BrandingProfile>(`/settings/branding-profiles/${id}/default`, {}).then(r => r.data),
+  uploadBrandingProfileLogo: (id: number, file: File) => {
+    const fd = new FormData()
+    fd.append('file', file)
+    return api.post<BrandingProfile>(`/settings/branding-profiles/${id}/logo`, fd, {
+      headers: { 'Content-Type': 'multipart/form-data' },
+    }).then(r => r.data)
+  },
+  deleteBrandingProfileLogo: (id: number) =>
+    api.delete<BrandingProfile>(`/settings/branding-profiles/${id}/logo`).then(r => r.data),
+
   getPdfSigningDiagnostics: () =>
     api.get<PdfSigningDiagnostics>('/settings/pdf-signing/diagnostics').then(r => r.data),
   getSigningSettings: () =>
@@ -733,6 +778,10 @@ export const settingsApi = {
   deletePdfSignatureDocumentSelection: (entityType: PdfSignatureDocumentEntityType, id: number) =>
     api.delete<PdfSignatureDocumentSelection>(`/documents/${entityType}/${id}/signature-selection`).then(r => r.data),
   // Vrací HTML string — frontend ho pak nacpe do iframe.srcdoc (obejde X-Frame-Options DENY).
-  emailPreviewHtml: (locale: 'cs' | 'en' = 'cs') =>
-    api.get<string>(`/settings/email-branding/preview?locale=${locale}`, { responseType: 'text', transformResponse: [(d) => d] }).then(r => r.data),
+  emailPreviewHtml: (locale: 'cs' | 'en' = 'cs', brandingProfileId: number | null = null) =>
+    api.get<string>('/settings/email-branding/preview', {
+      params: { locale, ...(brandingProfileId !== null ? { branding_profile_id: brandingProfileId } : {}) },
+      responseType: 'text',
+      transformResponse: [(d) => d],
+    }).then(r => r.data),
 }

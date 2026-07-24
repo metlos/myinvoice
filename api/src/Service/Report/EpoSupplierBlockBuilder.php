@@ -21,8 +21,11 @@ final class EpoSupplierBlockBuilder
      *
      * @param array<string,mixed> $supplier Načteno z `supplier` tabulky včetně
      *                                       cz_nace_code, opr_*, sest_*, street_number_*.
+     * @param bool $includeContact Emitovat `email`/`c_telef`? DPHDP3 a DPHKH1 je znají,
+     *                             DPHSHV (souhrnné hlášení) NE — tam by je EPO odmítlo
+     *                             (VetaP XSD ty atributy nemá). SH volá s `false`.
      */
-    public static function fillVetaP(DOMElement $vetaP, array $supplier): void
+    public static function fillVetaP(DOMElement $vetaP, array $supplier, bool $includeContact = true): void
     {
         // c_ufo (kód FÚ) je required. Fallback "451" (Praha 1) pokud chybí.
         $vetaP->setAttribute('c_ufo', (string) ($supplier['financial_office_code'] ?: '451'));
@@ -32,9 +35,14 @@ final class EpoSupplierBlockBuilder
         // DIČ — pattern [0-9]{1,10}, strip "CZ" prefix.
         $dic = (string) ($supplier['dic'] ?? '');
         $vetaP->setAttribute('dic', preg_replace('/^CZ/i', '', $dic) ?? $dic);
-        $vetaP->setAttribute('typ_ds', $supplier['data_box_type'] ?: 'F');
+        // typ_ds = TYP DAŇOVÉHO SUBJEKTU (F = fyzická, P = právnická osoba), NIKOLI typ
+        // datové schránky — ten se sem plnil dřív a shodil podání každé právnické
+        // osobě („U fyzické osoby musí být kmenová část DIČ tvořena RČ nebo vlastním
+        // číslem plátce"). Jediný autoritativní zdroj je `taxpayer_type` (fo/po).
+        $isPravnickaOsoba = ($supplier['taxpayer_type'] ?? null) === 'po';
+        $vetaP->setAttribute('typ_ds', $isPravnickaOsoba ? 'P' : 'F');
 
-        if (($supplier['taxpayer_type'] ?? null) === 'po') {
+        if ($isPravnickaOsoba) {
             $vetaP->setAttribute('zkrobchjm', (string) $supplier['company_name']);
         } else {
             // Fyzická osoba (OSVČ) — jmeno/prijmeni = sám daňový subjekt.
@@ -89,8 +97,10 @@ final class EpoSupplierBlockBuilder
             $vetaP->setAttribute('stat', $statName);
         }
 
-        if (!empty($supplier['email'])) $vetaP->setAttribute('email', (string) $supplier['email']);
-        if (!empty($supplier['phone'])) $vetaP->setAttribute('c_telef', self::normalizePhone((string) $supplier['phone']));
+        if ($includeContact) {
+            if (!empty($supplier['email'])) $vetaP->setAttribute('email', (string) $supplier['email']);
+            if (!empty($supplier['phone'])) $vetaP->setAttribute('c_telef', self::normalizePhone((string) $supplier['phone']));
+        }
 
         // Oprávněná osoba (POVINNÉ u PO — jednatel apod.)
         if (!empty($supplier['opr_jmeno']))     $vetaP->setAttribute('opr_jmeno', (string) $supplier['opr_jmeno']);

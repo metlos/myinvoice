@@ -19,6 +19,14 @@ referenční dokument."*
 Export do ISDOC 6.0 standardu — kompatibilní s Pohoda, Money S3, iDoklad a dalšími.
 Strategie: **role inversion** — v ISDOC pro přijatou fakturu je *dodavatel* =
 původní vendor, *zákazník* = naše firma (opak vystavené).
+Platební údaje exportují evidovaný bankovní účet dodavatele a variabilní symbol.
+Pokud není variabilní symbol vyplněn samostatně, odvodí se z čísla faktury
+dodavatele.
+
+Číslo dokladu dodavatele je v kořenovém elementu `<ID>`. Interní číslo přijaté
+faktury v MyInvoice (např. `PF2607002`) zůstává oddělené v
+`<Extensions><myi:InternalDocumentNumber>` s namespace
+`https://myinvoice.cz/isdoc/extensions/2026`.
 
 ### Pohoda XML
 Pohoda dataPack XML pro import do účetního software Pohoda. Direction =

@@ -13,7 +13,10 @@ use MyInvoice\Repository\InvoiceRepository;
 use MyInvoice\Repository\RecurringTemplateRepository;
 use MyInvoice\Service\ActivityLogger;
 use MyInvoice\Service\Invoice\PeriodicityCalculator;
+use MyInvoice\Service\Invoice\InvoiceMath;
+use MyInvoice\Service\Invoice\PriceListResolutionException;
 use MyInvoice\Service\Invoice\RecurringInvoiceGenerator;
+use MyInvoice\Service\Invoice\RecurringPriceListService;
 use MyInvoice\Service\IpMatcher;
 use MyInvoice\Service\Validation\InvoiceAmountPolicy;
 use PDO;
@@ -43,6 +46,7 @@ final class RecurringTemplateAction
         private readonly InvoiceRepository $invoices,
         private readonly Config $config,
         private readonly \MyInvoice\Service\Currency\CnbExchangeRateClient $cnb,
+        private readonly RecurringPriceListService $priceList,
     ) {}
 
     public function list(Request $request, Response $response): Response
@@ -73,10 +77,68 @@ final class RecurringTemplateAction
         }
 
         $result = $this->repo->list($filters, $page, $perPage, $sort, $czkRates);
+        $this->applyCatalogEstimates($result['data']);
         // Souhrn částek do hlavičky: per měna z repo + přepočet na CZK (dnešní ČNB kurz)
         // pokud je víc měn. Počítá se přes celou filtrovanou množinu (ne jen stránku).
         $result['meta']['summary'] = $this->buildSummary($result['meta']['totals_by_currency'] ?? []);
         return Json::ok($response, $result);
+    }
+
+    /** @param list<array<string,mixed>> $templates */
+    private function applyCatalogEstimates(array &$templates): void
+    {
+        $itemsByTemplate = $this->repo->itemsForTemplates(array_map(
+            static fn (array $template): int => (int) $template['id'],
+            $templates,
+        ));
+        $vatRates = $this->invoices->vatRateMap();
+        $today = new \DateTimeImmutable('today');
+
+        foreach ($templates as &$template) {
+            $items = $itemsByTemplate[(int) $template['id']] ?? [];
+            $hasDynamicCatalog = array_any($items, static fn (array $item): bool =>
+                !empty($item['price_list_item_id']) && ($item['catalog_policy'] ?? 'fixed') !== 'fixed'
+            );
+            if (!$hasDynamicCatalog) continue;
+
+            try {
+                $effective = $this->priceList->resolveForGeneration(
+                    $items,
+                    (int) $template['supplier_id'],
+                    (int) $template['client_id'],
+                    (int) $template['currency_id'],
+                    !empty($template['prices_include_vat']),
+                    $today,
+                );
+                $mathItems = array_map(static fn (array $item): array => [
+                    'quantity' => (float) $item['quantity'],
+                    'unit_price_without_vat' => (float) $item['unit_price_without_vat'],
+                    'vat_rate_snapshot' => (float) ($vatRates[(int) $item['vat_rate_id']] ?? 0),
+                ], $effective);
+                $totals = InvoiceMath::compute(
+                    $mathItems,
+                    !empty($template['reverse_charge']),
+                    !empty($template['prices_include_vat']),
+                )['totals'];
+                $discount = min(100.0, max(0.0, (float) ($template['discount_percent'] ?? 0)));
+                $template['total_with_vat'] = round($totals['with_vat'] * (100 - $discount) / 100, 2);
+
+                $dates = array_values(array_filter(array_map(
+                    static fn (array $item): ?string => $item['catalog_exchange_rate_date'] ?? null,
+                    $effective,
+                )));
+                sort($dates);
+                $template['catalog_total_is_estimate'] = $dates !== [];
+                $template['catalog_estimate_rate_date'] = $dates !== [] ? end($dates) : null;
+                $template['catalog_state'] = 'ok';
+            } catch (PriceListResolutionException $e) {
+                $template['catalog_state'] = $e->errorCode === 'price_list_item_archived'
+                    ? 'archived'
+                    : ($e->errorCode === 'price_list_review_required' ? 'changed' : 'error');
+                $template['catalog_error'] = $e->getMessage();
+            }
+        }
+        unset($template);
     }
 
     /**
@@ -120,6 +182,9 @@ final class RecurringTemplateAction
         if (!SupplierGuard::owns($request, $tpl)) {
             return Json::error($response, 'not_found', 'Šablona nenalezena.', 404);
         }
+        $estimated = [$tpl];
+        $this->applyCatalogEstimates($estimated);
+        $tpl = $estimated[0];
         return Json::ok($response, $tpl);
     }
 
@@ -163,20 +228,26 @@ final class RecurringTemplateAction
         $supplierId = SupplierGuard::currentId($request);
         $body['supplier_id'] = $supplierId;
 
+        // next_run_date = anchor_date pokud není explicitně zadané
+        $body['next_run_date'] = $body['next_run_date'] ?? ($body['anchor_date'] ?? null);
+        try {
+            $body = $this->prepareCatalogItems($body, true);
+        } catch (PriceListResolutionException $e) {
+            return Json::error($response, $e->errorCode, $e->getMessage(), 409, [
+                'price_list_item_id' => $e->priceListItemId,
+            ]);
+        }
+
         $errors = $this->validate($body);
         if (!empty($errors)) {
             return Json::error($response, 'validation_failed', 'Validace selhala', 400, ['fields' => $errors]);
         }
 
-        // next_run_date = anchor_date pokud není explicitně zadané
-        $body['next_run_date'] = $body['next_run_date'] ?? $body['anchor_date'];
-
         $user = (array) $request->getAttribute(AuthMiddleware::ATTR_USER, []);
         $userId = (int) ($user['id'] ?? 0);
         $ip = $this->ipMatcher->clientIpFromRequest($request->getServerParams());
 
-        $id = $this->repo->create($body, $userId);
-        $this->repo->replaceItems($id, (array) ($body['items'] ?? []));
+        $id = $this->repo->createWithItems($body, $userId, (array) ($body['items'] ?? []));
 
         $this->logger->log('recurring.created', $userId, 'recurring_template', $id, [
             'client_id' => $body['client_id'],
@@ -196,14 +267,46 @@ final class RecurringTemplateAction
 
         $body = (array) ($request->getParsedBody() ?? []);
         $body['supplier_id'] = (int) $tpl['supplier_id'];
+        $body['next_run_date'] = empty($tpl['last_run_date'])
+            ? ($body['anchor_date'] ?? $tpl['anchor_date'])
+            : $tpl['next_run_date'];
+
+        // Pevnou částku nelze tiše reinterpretovat v jiné měně nebo mezi netto/brutto.
+        // Změna zákazníka ji naopak záměrně zachová; uživatel ji může obnovit explicitně.
+        $fixedSnapshotContextChanged = (int) ($body['currency_id'] ?? 0) !== (int) $tpl['currency_id']
+            || (!empty($body['prices_include_vat']) !== !empty($tpl['prices_include_vat']));
+        if ($fixedSnapshotContextChanged) {
+            foreach ((array) ($body['items'] ?? []) as $item) {
+                if (is_array($item)
+                    && !empty($item['price_list_item_id'])
+                    && ($item['catalog_policy'] ?? 'fixed') === 'fixed'
+                    && empty($item['accept_catalog_changes'])
+                ) {
+                    return Json::error(
+                        $response,
+                        'fixed_catalog_snapshot_context_changed',
+                        'Po změně měny nebo režimu cen je nutné ceníkovou položku znovu vybrat.',
+                        409,
+                        ['price_list_item_id' => (int) $item['price_list_item_id']],
+                    );
+                }
+            }
+        }
+
+        try {
+            $body = $this->prepareCatalogItems($body, false);
+        } catch (PriceListResolutionException $e) {
+            return Json::error($response, $e->errorCode, $e->getMessage(), 409, [
+                'price_list_item_id' => $e->priceListItemId,
+            ]);
+        }
 
         $errors = $this->validate($body);
         if (!empty($errors)) {
             return Json::error($response, 'validation_failed', 'Validace selhala', 400, ['fields' => $errors]);
         }
 
-        $this->repo->update($id, $body);
-        $this->repo->replaceItems($id, (array) ($body['items'] ?? []));
+        $this->repo->updateWithItems($id, $body, (array) ($body['items'] ?? []));
 
         $user = (array) $request->getAttribute(AuthMiddleware::ATTR_USER, []);
         $ip = $this->ipMatcher->clientIpFromRequest($request->getServerParams());
@@ -432,6 +535,36 @@ final class RecurringTemplateAction
         }
 
         return $err;
+    }
+
+    private function prepareCatalogItems(array $body, bool $newTemplate): array
+    {
+        if (empty($body['client_id']) || empty($body['currency_id']) || empty($body['next_run_date'])) {
+            return $body;
+        }
+        try {
+            $issueDate = new \DateTimeImmutable((string) $body['next_run_date']);
+        } catch (\Exception) {
+            return $body;
+        }
+
+        $referenceDate = $issueDate;
+        if (($body['invoice_type'] ?? 'invoice') !== 'proforma'
+            && ($body['tax_date_mode'] ?? 'same_as_issue') === 'previous_month_last_day'
+        ) {
+            $referenceDate = $issueDate->modify('first day of this month')->modify('-1 day');
+        }
+
+        $body['items'] = $this->priceList->prepareForSave(
+            (array) ($body['items'] ?? []),
+            (int) $body['supplier_id'],
+            (int) $body['client_id'],
+            (int) $body['currency_id'],
+            !empty($body['prices_include_vat']),
+            $referenceDate,
+            $newTemplate,
+        );
+        return $body;
     }
 
     private static function isValidDate(string $date): bool

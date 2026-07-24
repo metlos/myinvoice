@@ -7,6 +7,7 @@ import { integrationsApi,
 import { useRouter, useRoute } from 'vue-router'
 import { useToast } from '@/composables/useToast'
 import { apiErrorMessage } from '@/api/errors'
+import { purchaseInvoicesApi, type PurchaseDocumentKind } from '@/api/purchaseInvoices'
 
 const { t } = useI18n()
 const toast = useToast()
@@ -80,6 +81,8 @@ async function deleteIdokladCreds() {
 
 // ── iDoklad import job state ──────────────────────────────────────────
 const startParams = ref({
+  include_bank_accounts: true,
+  include_bank_transactions: false,
   include_clients: true,
   include_issued: true,
   include_received: true,
@@ -332,10 +335,36 @@ async function deleteAiCreds() {
   }
 }
 
+// Přijme 1..N souborů z file-pickeru i drag&drop: 1 = single-file flow, více = dávka.
+function acceptAiFiles(files: File[]) {
+  if (files.length === 0) return
+  const pdfs = files.filter(f =>
+    f.type === 'application/pdf' || f.type.startsWith('image/') ||
+    /\.(pdf|jpe?g|png|webp|heic|heif|gif|bmp|isdoc|isdocx)$/i.test(f.name))
+  if (pdfs.length === 0) {
+    toast.error(t('integrations.ai.only_pdf'))
+    return
+  }
+  if (pdfs.length === 1) {
+    // Single — původní single-file flow (Extrahovat + vytvořit draft)
+    aiPdfFile.value = pdfs[0]
+    aiBatchQueue.value = []
+    aiBatchId.value = ''
+    aiResult.value = null
+  } else {
+    // Batch — naqueue všechny, user klikne "Spustit dávku"
+    aiBatchQueue.value = pdfs.map(f => ({ file: f, status: 'pending' as const, result: null }))
+    aiBatchId.value = newBatchId()
+    aiPdfFile.value = null
+    aiResult.value = null
+  }
+}
+
 function onAiPdfPick(e: Event) {
   const input = e.target as HTMLInputElement
-  aiPdfFile.value = input.files?.[0] ?? null
-  aiResult.value = null
+  acceptAiFiles(Array.from(input.files ?? []))
+  // Reset hodnoty inputu, ať jde znovu vybrat týž soubor (change se jinak nespustí).
+  input.value = ''
 }
 
 // Drag & drop handlers (browser default = open PDF in tab; preventDefault zastaví)
@@ -350,9 +379,21 @@ interface BatchItem {
 }
 const aiBatchQueue = ref<BatchItem[]>([])
 const aiBatchRunning = ref(false)
+// Identifikátor dávky (#232) — protáhne se do každého importu, ať jde celá dávka
+// po dokončení dohledat/filtrovat v seznamu přijatých faktur.
+const aiBatchId = ref('')
+const kindBusyIdx = ref<number | null>(null)
+
+function newBatchId(): string {
+  const uuid = (typeof crypto !== 'undefined' && crypto.randomUUID)
+    ? crypto.randomUUID()
+    : `${Date.now().toString(36)}${Math.random().toString(36).slice(2)}`
+  return uuid.replace(/-/g, '').slice(0, 32)
+}
 
 async function runAiBatch() {
   if (aiBatchRunning.value || aiBatchQueue.value.length === 0) return
+  if (!aiBatchId.value) aiBatchId.value = newBatchId()
   aiBatchRunning.value = true
   try {
     for (const item of aiBatchQueue.value) {
@@ -360,7 +401,7 @@ async function runAiBatch() {
       item.status = 'processing'
       try {
         const model = aiPerRequestModel.value || undefined
-        const r = await integrationsApi.extractPdfAi(item.file, model)
+        const r = await integrationsApi.extractPdfAi(item.file, model, aiBatchId.value)
         item.result = r
         item.status = r.ok ? 'ok' : 'failed'
       } catch (e: any) {
@@ -375,8 +416,38 @@ async function runAiBatch() {
   }
 }
 
+// Souhrn dokončené dávky (počty pro hlavičku výsledků).
+const batchOkCount = computed(() => aiBatchQueue.value.filter(x => x.status === 'ok').length)
+const batchFailedCount = computed(() => aiBatchQueue.value.filter(x => x.status === 'failed').length)
+const batchDone = computed(() =>
+  aiBatchQueue.value.length > 0 && aiBatchQueue.value.every(x => x.status === 'ok' || x.status === 'failed'))
+
+// Inline oprava typu dokladu přímo v přehledu dávky (#232) — AI účtenku klasifikuje
+// jako „Doklad o úhradě" (receipt), účetní ji přehodí na „Faktura" bez otevírání detailu.
+async function changeBatchItemKind(item: BatchItem, idx: number, kind: PurchaseDocumentKind) {
+  const id = item.result?.purchase_invoice_id
+  if (!id) return
+  kindBusyIdx.value = idx
+  try {
+    await purchaseInvoicesApi.setDocumentKind(id, kind)
+    item.result.document_kind = kind
+    toast.success(t('integrations.ai.kind_changed'))
+  } catch (e) {
+    toast.error(apiErrorMessage(e))
+  } finally {
+    kindBusyIdx.value = null
+  }
+}
+
+// Otevřít celou dávku v seznamu přijatých faktur (předfiltrováno na tuto dávku).
+function openBatchInList() {
+  if (!aiBatchId.value) return
+  router.push({ path: '/purchase-invoices', query: { import_batch: aiBatchId.value } })
+}
+
 function clearBatch() {
   aiBatchQueue.value = []
+  aiBatchId.value = ''
 }
 function onAiDragEnter(e: DragEvent) { e.preventDefault(); aiDragOver.value = true }
 function onAiDragOver(e: DragEvent) {
@@ -389,27 +460,7 @@ function onAiDragLeave(e: DragEvent) {
 function onAiDrop(e: DragEvent) {
   e.preventDefault()
   aiDragOver.value = false
-  const files = Array.from(e.dataTransfer?.files ?? [])
-  if (files.length === 0) return
-
-  const pdfs = files.filter(f =>
-    f.type === 'application/pdf' || f.type.startsWith('image/') ||
-    /\.(pdf|jpe?g|png|webp|heic|heif|gif|bmp|isdoc|isdocx)$/i.test(f.name))
-  if (pdfs.length === 0) {
-    toast.error(t('integrations.ai.only_pdf'))
-    return
-  }
-
-  if (pdfs.length === 1) {
-    // Single drop — preserve původní single-file flow
-    aiPdfFile.value = pdfs[0]
-    aiResult.value = null
-  } else {
-    // Batch — naqueue všechny, user klikne "Spustit dávku"
-    aiBatchQueue.value = pdfs.map(f => ({ file: f, status: 'pending' as const, result: null }))
-    aiPdfFile.value = null
-    aiResult.value = null
-  }
+  acceptAiFiles(Array.from(e.dataTransfer?.files ?? []))
 }
 
 async function runAiExtract() {
@@ -544,6 +595,14 @@ onUnmounted(() => {
         <div v-if="!isJobRunning" class="space-y-3">
           <p class="text-sm text-neutral-600">{{ t('integrations.idoklad.run_hint') }}</p>
           <div class="grid grid-cols-2 gap-3">
+            <label class="flex items-center gap-2 text-sm">
+              <input v-model="startParams.include_bank_accounts" type="checkbox" class="rounded border-neutral-300 text-primary-600" />
+              {{ t('integrations.idoklad.include_bank_accounts') }}
+            </label>
+            <label class="flex items-center gap-2 text-sm">
+              <input v-model="startParams.include_bank_transactions" type="checkbox" class="rounded border-neutral-300 text-primary-600" />
+              <span :title="t('integrations.idoklad.include_bank_transactions_hint')">{{ t('integrations.idoklad.include_bank_transactions') }}</span>
+            </label>
             <label class="flex items-center gap-2 text-sm">
               <input v-model="startParams.include_clients" type="checkbox" class="rounded border-neutral-300 text-primary-600" />
               {{ t('integrations.idoklad.include_clients') }}
@@ -944,7 +1003,7 @@ onUnmounted(() => {
               ? 'border-primary-500 bg-primary-50'
               : 'border-neutral-300 hover:border-primary-400 hover:bg-primary-50/30'"
             @dragenter="onAiDragEnter" @dragover="onAiDragOver" @dragleave="onAiDragLeave" @drop="onAiDrop">
-            <input type="file" accept="application/pdf,.pdf,image/*,.isdoc,.isdocx" @change="onAiPdfPick" class="hidden" />
+            <input type="file" multiple accept="application/pdf,.pdf,image/*,.isdoc,.isdocx" @change="onAiPdfPick" class="hidden" />
             <svg class="w-8 h-8 mx-auto text-neutral-400 mb-2" fill="none" viewBox="0 0 24 24" stroke="currentColor" stroke-width="1.5">
               <path stroke-linecap="round" stroke-linejoin="round" d="M7 16a4 4 0 0 1-.88-7.9 5 5 0 0 1 9.9-1A5.5 5.5 0 0 1 18.5 16H17m-5-4v9m0-9l-3 3m3-3l3 3" />
             </svg>
@@ -979,27 +1038,88 @@ onUnmounted(() => {
               {{ t('common.cancel') }}
             </button>
           </div>
-          <div class="space-y-1 max-h-64 overflow-y-auto border border-neutral-200 rounded-md p-2 text-xs">
-            <div v-for="(item, idx) in aiBatchQueue" :key="idx" class="flex items-center justify-between gap-2 py-1">
-              <span class="font-mono truncate flex-1">{{ item.file.name }}</span>
-              <span class="text-neutral-400">{{ Math.round(item.file.size / 1024) }} kB</span>
-              <span :class="[
-                'px-2 py-0.5 rounded text-[10px] font-medium uppercase tracking-wide',
-                item.status === 'ok' ? 'bg-success-50 text-success-600' :
-                item.status === 'failed' ? 'bg-danger-50 text-danger-500' :
-                item.status === 'processing' ? 'bg-warning-50 text-warning-600' :
-                'bg-neutral-100 text-neutral-500']">
-                {{ item.status === 'processing' ? '…' : item.status }}
-              </span>
-              <RouterLink v-if="item.status === 'ok' && item.result?.purchase_invoice_id"
-                :to="`/purchase-invoices/${item.result.purchase_invoice_id}`"
-                class="text-primary-600 hover:underline text-[10px]">→</RouterLink>
-            </div>
+          <div class="overflow-x-auto border border-neutral-200 rounded-md">
+            <table class="w-full text-xs">
+              <thead>
+                <tr class="bg-neutral-50 text-neutral-500 text-left">
+                  <th class="px-2 py-1.5 font-medium">{{ t('integrations.ai.col_file') }}</th>
+                  <th class="px-2 py-1.5 font-medium">{{ t('integrations.ai.col_status') }}</th>
+                  <th class="px-2 py-1.5 font-medium">{{ t('integrations.ai.col_vendor') }}</th>
+                  <th class="px-2 py-1.5 font-medium text-right">{{ t('integrations.ai.col_amount') }}</th>
+                  <th class="px-2 py-1.5 font-medium">{{ t('integrations.ai.col_kind') }}</th>
+                  <th class="px-2 py-1.5 font-medium text-right"></th>
+                </tr>
+              </thead>
+              <tbody class="divide-y divide-neutral-100">
+                <tr v-for="(item, idx) in aiBatchQueue" :key="idx" class="align-middle">
+                  <td class="px-2 py-1.5 font-mono max-w-[10rem] truncate" :title="item.file.name">{{ item.file.name }}</td>
+                  <td class="px-2 py-1.5">
+                    <span :class="[
+                      'px-2 py-0.5 rounded text-[10px] font-medium uppercase tracking-wide',
+                      item.status === 'ok' ? 'bg-success-50 text-success-600' :
+                      item.status === 'failed' ? 'bg-danger-50 text-danger-500' :
+                      item.status === 'processing' ? 'bg-warning-50 text-warning-600' :
+                      'bg-neutral-100 text-neutral-500']">
+                      {{ item.status === 'processing' ? '…' : item.status }}
+                    </span>
+                    <span v-if="item.status === 'ok' && item.result?.duplicate" class="ml-1 text-[10px] text-neutral-400">
+                      ({{ t('integrations.ai.duplicate') }})
+                    </span>
+                  </td>
+                  <td class="px-2 py-1.5 text-neutral-700 max-w-[9rem] truncate" :title="item.result?.vendor_name || ''">
+                    {{ item.result?.vendor_name || '—' }}
+                  </td>
+                  <td class="px-2 py-1.5 text-right whitespace-nowrap text-neutral-700">
+                    <template v-if="item.result?.total_with_vat != null">
+                      {{ Math.round(item.result.total_with_vat).toLocaleString('cs-CZ') }} {{ item.result?.currency || '' }}
+                    </template>
+                    <template v-else>—</template>
+                  </td>
+                  <td class="px-2 py-1.5">
+                    <select v-if="item.status === 'ok' && item.result?.purchase_invoice_id && item.result?.document_kind !== 'advance'"
+                      :value="item.result.document_kind"
+                      :disabled="kindBusyIdx === idx"
+                      @change="changeBatchItemKind(item, idx, ($event.target as HTMLSelectElement).value as PurchaseDocumentKind)"
+                      class="h-7 px-1.5 border border-neutral-300 rounded bg-surface text-[11px] disabled:opacity-50">
+                      <option value="invoice">{{ t('purchase_invoice.document_kind.invoice') }}</option>
+                      <option value="receipt">{{ t('purchase_invoice.document_kind.receipt') }}</option>
+                      <option value="credit_note">{{ t('purchase_invoice.document_kind.credit_note') }}</option>
+                    </select>
+                    <span v-else-if="item.result?.document_kind === 'advance'" class="text-[11px] text-neutral-500">
+                      {{ t('purchase_invoice.document_kind.advance') }}
+                    </span>
+                    <span v-else class="text-neutral-300">—</span>
+                  </td>
+                  <td class="px-2 py-1.5 text-right">
+                    <RouterLink v-if="item.status === 'ok' && item.result?.purchase_invoice_id"
+                      :to="`/purchase-invoices/${item.result.purchase_invoice_id}`"
+                      class="text-primary-600 hover:underline whitespace-nowrap">
+                      {{ t('integrations.ai.open') }} #{{ item.result.purchase_invoice_id }}
+                    </RouterLink>
+                    <span v-else-if="item.status === 'failed'" class="text-danger-500 text-[11px]" :title="item.result?.error || item.result?.error?.message || ''">
+                      {{ t('integrations.ai.failed_short') }}
+                    </span>
+                  </td>
+                </tr>
+              </tbody>
+            </table>
           </div>
           <button type="button" @click="runAiBatch" :disabled="aiBatchRunning"
                   class="mt-3 cursor-pointer w-full h-10 bg-primary-600 hover:bg-primary-700 disabled:bg-neutral-300 text-white text-sm font-medium rounded-md">
             {{ aiBatchRunning ? t('integrations.ai.batch_running') : t('integrations.ai.batch_run') }}
           </button>
+
+          <!-- Souhrn dokončené dávky + proklik na celou dávku v seznamu přijatých -->
+          <div v-if="batchDone" class="mt-3 flex items-center justify-between gap-2 flex-wrap rounded-md bg-success-50 border border-success-500/40 px-3 py-2">
+            <span class="text-sm text-success-700">
+              ✓ {{ t('integrations.ai.batch_summary', { ok: batchOkCount, failed: batchFailedCount }) }}
+            </span>
+            <button type="button" @click="openBatchInList"
+                    class="cursor-pointer text-sm font-medium text-primary-700 hover:text-primary-800 underline">
+              {{ t('integrations.ai.show_in_list') }}
+            </button>
+          </div>
+
           <p class="text-xs text-neutral-500 mt-2">
             ℹ {{ t('integrations.ai.batch_serial_hint') }}
           </p>

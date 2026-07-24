@@ -105,6 +105,22 @@ tags:
     description: Kniha jízd — vozidla, jízdy, tankování a daňové souhrny
 
 paths:
+  /api/v1/branding-profiles:
+    parameters:
+      - $ref: '#/components/parameters/SupplierIdHeader'
+    get:
+      tags: [Settings]
+      summary: Aktivní brandingové profily aktuálního dodavatele
+      description: "Vrací ID a vizuální údaje použitelné jako `branding_profile_id` při vytvoření faktury. Endpoint je pouze pro čtení."
+      responses:
+        '200':
+          description: OK
+          content:
+            application/json:
+              schema:
+                type: array
+                items: { $ref: '#/components/schemas/BrandingProfile' }
+
   /api/v1/health:
     get:
       tags: [System]
@@ -448,6 +464,48 @@ paths:
             application/json:
               schema: { $ref: '#/components/schemas/Error' }
 
+  /api/v1/invoices/export.pdf:
+    get:
+      tags: [Invoices]
+      summary: Sloučené PDF vybraných faktur
+      description: |
+        Spojí až 100 faktur zvolených parametrem `ids` do jednoho PDF v uvedeném
+        pořadí. Výstup obsahuje pouze vlastní strany faktur, bez příloh, vloženého
+        ISDOC a výkazů práce. Všechny faktury musí patřit dodavateli z
+        `X-Supplier-Id` a být vystavené (`issued`, `sent`, `reminded`, `paid`) —
+        koncepty a stornované doklady se odmítnou. S `sign_pdf=true` se
+        elektronicky podepíše až výsledný celek profilem nastaveným pro PDF faktur.
+      parameters:
+        - $ref: '#/components/parameters/SupplierIdHeader'
+        - in: query
+          name: ids
+          required: true
+          description: ID faktur oddělená čárkou; duplicity se odstraní při zachování pořadí.
+          schema: { type: string, pattern: '^[1-9][0-9]*(,[1-9][0-9]*)*$' }
+          example: 125,124,119
+        - { in: query, name: sign_pdf, schema: { type: boolean, default: false }, description: "Elektronicky podepíše výsledné sloučené PDF." }
+      responses:
+        '200':
+          description: Sloučený PDF soubor (Content-Disposition attachment)
+          content:
+            application/pdf:
+              schema: { type: string, format: binary }
+        '400':
+          $ref: '#/components/responses/ValidationFailed'
+        '404':
+          description: Některá vybraná faktura neexistuje nebo patří jinému dodavateli
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/Error' }
+        '422':
+          description: |
+            Překročen limit 100 faktur (`too_many`), výběr obsahuje koncept nebo
+            stornovaný doklad (`not_exportable`), nebo výsledné PDF nelze
+            podepsat (`signature_unavailable`).
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/Error' }
+
   /api/v1/invoices/export:
     get:
       tags: [Invoices]
@@ -457,28 +515,38 @@ paths:
         issued/sent/reminded/paid), supplier scope dle `X-Supplier-Id`:
 
         - `pdf-zip` — ZIP s jedním PDF na doklad (`Faktura-{vs}.pdf`, dobropisy
-          `Dobropis-{vs}.pdf` atd.)
+          `Dobropis-{vs}.pdf` atd.); s `merge_pdf=true` místo ZIPu vrátí jeden
+          sloučený PDF soubor obsahující pouze faktury bez příloh a výkazů práce
         - `isdoc` — ISDOC XML; jeden doklad = samostatný `.isdoc`, víc dokladů = ZIP
         - `pohoda` — Pohoda XML dataPack
         - `stereo` — Stereo (Ježek) XML
+        - `money_s3` — Money S3 (Seyfor) XML, formát „Faktury vydané"
+          (SeznamFaktVyd/FaktVyd). Bez oficiálního veřejného XSD — struktura
+          rekonstruovaná z reálného exportního vzorku. Podporuje jen sazby DPH
+          0 %, 12 % a 21 % (aktuální české sazby); jiná sazba na položce
+          export odmítne (400).
 
         Období: `month=YYYY-MM`, nebo `period=quarterly&year=YYYY&quarter=1..4`.
         `date_by=issue|tax` řídí zařazení do období (default issue; `tax` = DUZP,
         shodné s výkazy DPH).
       parameters:
         - $ref: '#/components/parameters/SupplierIdHeader'
-        - { in: query, name: format, required: true, schema: { type: string, enum: [pdf-zip, isdoc, pohoda, stereo] } }
+        - { in: query, name: format, required: true, schema: { type: string, enum: [pdf-zip, isdoc, pohoda, stereo, money_s3] } }
         - { in: query, name: month, schema: { type: string, pattern: '^\d{4}-\d{2}$' } }
         - { in: query, name: period, schema: { type: string, enum: [monthly, quarterly] } }
         - { in: query, name: year, schema: { type: integer } }
         - { in: query, name: quarter, schema: { type: integer, minimum: 1, maximum: 4 } }
         - { in: query, name: date_by, schema: { type: string, enum: [issue, tax], default: issue } }
         - { in: query, name: type, schema: { type: string, enum: [invoice, proforma, credit_note, cancellation], description: "Jen jeden typ dokladu (default všechny)" } }
+        - { in: query, name: merge_pdf, schema: { type: boolean, default: false }, description: "Jen pro format=pdf-zip. Vrátí jeden sloučený PDF soubor místo ZIP archivu; nejvýše 200 faktur za období." }
+        - { in: query, name: sign_pdf, schema: { type: boolean, default: false }, description: "Jen se současným merge_pdf=true. Elektronicky podepíše výsledný soubor profilem nastaveným pro PDF faktur." }
       responses:
         '200':
-          description: ZIP / XML stream (Content-Disposition attachment)
+          description: ZIP / PDF / XML stream (Content-Disposition attachment)
           content:
             application/zip:
+              schema: { type: string, format: binary }
+            application/pdf:
               schema: { type: string, format: binary }
             application/xml:
               schema: { type: string, format: binary }
@@ -486,6 +554,14 @@ paths:
           $ref: '#/components/responses/ValidationFailed'
         '404':
           description: Za období nejsou žádné vystavené faktury
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/Error' }
+        '422':
+          description: |
+            Výsledné PDF nebylo možné elektronicky podepsat (`signature_unavailable`),
+            nebo období obsahuje víc než 200 faktur, což je strop pro sloučené PDF
+            (`too_many`) — ZIP export strop nemá.
           content:
             application/json:
               schema: { $ref: '#/components/schemas/Error' }
@@ -625,9 +701,13 @@ paths:
       tags: [Invoices]
       summary: Evidované platby faktury
       description: |
-        Seznam plateb (částečných úhrad) faktury nebo zálohové faktury + souhrn:
+        Seznam plateb (částečných úhrad), přímo spárovaných bankovních operací
+        a souhrn faktury nebo zálohové faktury:
         `paid_total`, `remaining` (= `amount_to_pay - paid_total`) a odvozený
         `payment_status` (`unpaid` / `partially_paid` / `paid` / `overpaid`).
+        `bank_transactions` je informační vazba a samo o sobě se nezapočítává
+        do `paid_total`; využívá se mimo jiné pro historické doklady importované
+        jako uhrazené z externího systému.
       responses:
         '200':
           description: OK
@@ -639,13 +719,15 @@ paths:
                   payments:
                     type: array
                     items: { $ref: '#/components/schemas/InvoicePayment' }
+                  bank_transactions:
+                    type: array
+                    items: { $ref: '#/components/schemas/InvoiceRelatedBankTransaction' }
                   paid_total: { type: number, format: float }
                   amount_to_pay: { type: number, format: float }
                   remaining: { type: number, format: float }
                   payment_status:
-                    type: string
-                    nullable: true
-                    enum: [unpaid, partially_paid, paid, overpaid]
+                    type: [string, "null"]
+                    enum: [unpaid, partially_paid, paid, overpaid, null]
     post:
       tags: [Invoices]
       summary: Zaeviduje (částečnou) úhradu faktury
@@ -669,9 +751,9 @@ paths:
                   type: string
                   format: date
                   description: Datum platby (default = dnes)
-                variable_symbol: { type: string, nullable: true, maxLength: 20 }
-                bank_reference: { type: string, nullable: true, maxLength: 120 }
-                note: { type: string, nullable: true, maxLength: 255 }
+                variable_symbol: { type: [string, "null"], maxLength: 20 }
+                bank_reference: { type: [string, "null"], maxLength: 120 }
+                note: { type: [string, "null"], maxLength: 255 }
       responses:
         '200':
           description: OK
@@ -1164,6 +1246,74 @@ paths:
             application/json:
               schema: { $ref: '#/components/schemas/Invoice' }
 
+  /api/v1/invoices/{id}/public-link:
+    parameters:
+      - $ref: '#/components/parameters/SupplierIdHeader'
+      - in: path
+        name: id
+        required: true
+        schema: { type: integer, format: int64 }
+    post:
+      tags: [InvoiceComms]
+      summary: Web faktura — vrátí (a případně vytvoří) trvalý veřejný odkaz
+      description: |
+        Trvalý veřejný odkaz `/invoice/{token}` — klient si na něm fakturu
+        bez přihlášení prohlédne v HTML a stáhne PDF (obdoba „web faktury"
+        ve Fakturoidu). Token se generuje lazy při prvním volání; opakované
+        volání vrací tentýž odkaz (idempotentní). Odkaz se také automaticky
+        přikládá do e-mailu při odeslání faktury klientovi.
+
+        `public_viewed_at` = poslední zobrazení klientem (anonymní přístup);
+        null dokud klient fakturu neotevřel.
+      responses:
+        '200':
+          description: OK
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  url: { type: string, example: "https://faktury.example.cz/invoice/a1b2…" }
+                  token: { type: string, description: "48 hex znaků" }
+                  public_viewed_at: { type: [string, "null"], format: date-time }
+        '409':
+          description: Faktura je draft — web faktura je dostupná až po vystavení
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/Error' }
+        '404': { description: "Faktura nenalezena" }
+
+  /api/v1/invoices/{id}/public-link/regenerate:
+    parameters:
+      - $ref: '#/components/parameters/SupplierIdHeader'
+      - in: path
+        name: id
+        required: true
+        schema: { type: integer, format: int64 }
+    post:
+      tags: [InvoiceComms]
+      summary: Web faktura — zneplatní stávající odkaz vygenerováním nového
+      description: |
+        Revokace veřejného odkazu (např. při úniku URL) — starý token přestane
+        okamžitě platit, vrací se nová URL. `public_viewed_at` se resetuje.
+      responses:
+        '200':
+          description: OK
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  url: { type: string }
+                  token: { type: string }
+                  public_viewed_at: { type: [string, "null"], example: null }
+        '409':
+          description: Faktura je draft
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/Error' }
+        '404': { description: "Faktura nenalezena" }
+
   /api/v1/invoices/{id}/pdfs:
     parameters:
       - $ref: '#/components/parameters/SupplierIdHeader'
@@ -1257,8 +1407,8 @@ paths:
                         email: { type: string, format: email }
                         recipient: { type: string, enum: [to, cc, bcc] }
                         source: { type: string, enum: [contact, project, main_email] }
-                        usage: { type: string, nullable: true, enum: [communication, documents, reminders, approvals, null] }
-                        label: { type: string, nullable: true }
+                        usage: { type: [string, "null"], enum: [communication, documents, reminders, approvals, null] }
+                        label: { type: [string, "null"] }
         '404': { description: Faktura nenalezena }
 
   /api/v1/invoices/{id}/send:
@@ -1323,8 +1473,8 @@ paths:
                         email: { type: string, format: email }
                         recipient: { type: string, enum: [to, cc, bcc] }
                         source: { type: string, enum: [contact, project, main_email] }
-                        usage: { type: string, nullable: true, enum: [communication, documents, reminders, approvals, null] }
-                        label: { type: string, nullable: true }
+                        usage: { type: [string, "null"], enum: [communication, documents, reminders, approvals, null] }
+                        label: { type: [string, "null"] }
                   archived_pdf_id: { type: integer, format: int64 }
         '409':
           description: Faktura není ve stavu pro odeslání (draft)
@@ -1861,8 +2011,8 @@ paths:
                       type: object
                       properties:
                         account_number: { type: string }
-                        bank_code: { type: string, nullable: true }
-                        label: { type: string, nullable: true }
+                        bank_code: { type: [string, "null"] }
+                        label: { type: [string, "null"] }
                   scan_configured:
                     type: boolean
                     description: "Je nakonfigurované hostitelské adresářové skenování (cfg.bank_import.scan_root)? Interní příznak pro UI tlačítko Skenovat adresář."
@@ -2022,7 +2172,8 @@ paths:
         `proforma_number_format`, `credit_note_number_format`,
         `purchase_invoice_number_format`, `invoice_number_period`) a **branding
         PDF/e-mailů** (`email_branding_enabled`, `email_accent_color`,
-        `pdf_logo_show_name`, `display_name`, `tagline`). Logo se nahrává zvlášť
+        `pdf_logo_show_name`, `display_name`, `tagline`). Brandingová pole jsou
+        původním nastavením dodavatele. Logo se nahrává zvlášť
         (není součástí tohoto endpointu).
       requestBody:
         required: true
@@ -2466,8 +2617,8 @@ paths:
                   type: string
                   format: date
                   description: "Datum splatnosti / provedení příkazu."
-                constant_symbol: { type: string, nullable: true }
-                note: { type: string, nullable: true }
+                constant_symbol: { type: [string, "null"] }
+                note: { type: [string, "null"] }
                 mark_paid:
                   type: boolean
                   description: "Označit zařazené faktury jako předané k úhradě."
@@ -2684,10 +2835,9 @@ paths:
               properties:
                 material_title: { type: string, default: "Materiál" }
                 material_vat_rate_id:
-                  type: integer
-                  nullable: true
+                  type: [integer, "null"]
                   description: "Povinné, je-li alespoň jeden materiál; musí existovat v sazbách DPH."
-                project_id: { type: integer, nullable: true }
+                project_id: { type: [integer, "null"] }
                 materials:
                   type: array
                   items:
@@ -3153,8 +3303,8 @@ paths:
             schema:
               type: object
               properties:
-                rate: { type: number, nullable: true }
-                rate_date: { type: string, format: date, nullable: true }
+                rate: { type: [number, "null"] }
+                rate_date: { type: [string, "null"], format: date }
                 source: { type: string, enum: [cnb, manual, idoklad, fakturoid], default: manual }
       responses:
         '200': { description: OK }
@@ -3267,7 +3417,13 @@ paths:
       summary: ISDOC 6.0 XML export přijaté faktury
       description: |
         Role inversion — pro přijatou je `AccountingSupplierParty` = vendor,
-        `AccountingCustomerParty` = náš tenant.
+        `AccountingCustomerParty` = náš tenant. Kořenové `ID` obsahuje číslo
+        dokladu dodavatele; interní číslo MyInvoice je v
+        `Extensions/myi:InternalDocumentNumber` s namespace
+        `https://myinvoice.cz/isdoc/extensions/2026`. `PaymentMeans` obsahuje
+        evidovaný bankovní účet dodavatele a platební `VariableSymbol`; pokud
+        samostatný platební VS chybí, použije se jeho číselná podoba odvozená
+        z čísla faktury dodavatele.
       parameters:
         - { in: path, name: id, required: true, schema: { type: integer } }
         - $ref: '#/components/parameters/SupplierIdHeader'
@@ -3368,7 +3524,7 @@ paths:
         - { in: query, name: year,  required: true, schema: { type: integer } }
         - { in: query, name: month, required: true, schema: { type: integer, minimum: 1, maximum: 12 } }
       responses:
-        '200': { description: Summary s counts sekcí A.1/A.4/A.5/B.1/B.2/B.3 }
+        '200': { description: Summary s counts sekcí A.1/A.2/A.4/A.5/B.1/B.2/B.3 }
         '403': { description: Pouze admin/accountant }
 
   /api/v1/reports/dphkh1:
@@ -3397,7 +3553,7 @@ paths:
         - { in: query, name: year,  required: true, schema: { type: integer } }
         - { in: query, name: month, required: true, schema: { type: integer } }
       responses:
-        '200': { description: Summary s řádky (country, vat_id, sh_type, amount, count) }
+        '200': { description: "Summary s řádky (country, vat_id, sh_type, amount, count)" }
 
   /api/v1/reports/dphshv:
     get:
@@ -3747,6 +3903,9 @@ paths:
         Počet rekonstrukcí je v hlavičce `X-Export-Reconstructed`.
 
         `isdoc` / `pohoda`: generují XML z dat faktury (PDF nepotřebují).
+        ISDOC obsahuje také evidovaný bankovní účet dodavatele a platební
+        variabilní symbol. Číslo dokladu dodavatele je v kořenovém `ID`, interní
+        číslo MyInvoice v namespacovaném `Extensions/myi:InternalDocumentNumber`.
 
         Období lze zadat legacy parametrem `month=YYYY-MM`, nebo explicitně
         `period=monthly&year=YYYY&month=M` / `period=quarterly&year=YYYY&quarter=1..4`.
@@ -3944,7 +4103,7 @@ paths:
       summary: Seznam dokumentů a podsložek v dané složce
       parameters:
         - { $ref: '#/components/parameters/SupplierIdHeader' }
-        - { name: folder_id, in: query, schema: { type: integer, nullable: true }, description: 'NULL/prázdné = kořen' }
+        - { name: folder_id, in: query, schema: { type: [integer, "null"] }, description: 'NULL/prázdné = kořen' }
         - { name: doc_type, in: query, schema: { type: string, enum: [pdf, docx, xlsx, xml, zfo, p7s, zip, image, other] } }
       responses:
         '200':
@@ -3970,7 +4129,7 @@ paths:
               type: object
               properties:
                 'file[]': { type: array, items: { type: string, format: binary } }
-                folder_id: { type: integer, nullable: true }
+                folder_id: { type: [integer, "null"] }
                 zip_mode: { type: string, enum: [explode, keep], default: keep }
                 'relpaths[]': { type: array, items: { type: string }, description: 'Relativní cesty složek pro upload adresáře' }
       responses:
@@ -4042,7 +4201,7 @@ paths:
               type: object
               properties:
                 title: { type: string }
-                description: { type: string, nullable: true }
+                description: { type: [string, "null"] }
                 tags: { type: array, items: { type: string } }
       responses:
         '200': { description: Aktualizovaný dokument, content: { application/json: { schema: { $ref: '#/components/schemas/DocumentDetail' } } } }
@@ -4098,7 +4257,7 @@ paths:
       summary: Strom složek (bez parametru celý plochý seznam, s parent_id přímé potomky)
       parameters:
         - { $ref: '#/components/parameters/SupplierIdHeader' }
-        - { name: parent_id, in: query, schema: { type: integer, nullable: true } }
+        - { name: parent_id, in: query, schema: { type: [integer, "null"] } }
       responses:
         '200': { description: Složky, content: { application/json: { schema: { type: object, properties: { folders: { type: array, items: { $ref: '#/components/schemas/DocumentFolder' } } } } } } }
     post:
@@ -4114,7 +4273,7 @@ paths:
               required: [name]
               properties:
                 name: { type: string }
-                parent_id: { type: integer, nullable: true }
+                parent_id: { type: [integer, "null"] }
       responses:
         '200': { description: ok }
 
@@ -4618,8 +4777,8 @@ paths:
                   id: { type: integer, format: int64 }
                   is_vat_payer: { type: boolean }
                   source: { type: string, enum: [ares, vies, unknown] }
-                  ic: { type: string, nullable: true }
-                  dic: { type: string, nullable: true }
+                  ic: { type: [string, "null"] }
+                  dic: { type: [string, "null"] }
         '404':
           $ref: '#/components/responses/NotFound'
 
@@ -4720,6 +4879,41 @@ paths:
           content:
             application/pdf:
               schema: { type: string, format: binary }
+
+  /api/v1/reports/oss/preview:
+    get:
+      tags: [Reports]
+      summary: Náhled OSS přiznání
+      description: Kvartální podklad One Stop Shop z ručně označených řádků vydaných faktur. Vyžaduje zapnutý OSS režim v nastavení firmy.
+      parameters:
+        - $ref: '#/components/parameters/SupplierIdHeader'
+        - { in: query, name: year, required: true, schema: { type: integer, minimum: 2020, maximum: 2050 } }
+        - { in: query, name: quarter, required: true, schema: { type: integer, minimum: 1, maximum: 4 } }
+      responses:
+        '200':
+          description: OSS souhrn podle zemí a sazeb
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/OssPreview' }
+        '409':
+          description: OSS režim není v nastavení firmy aktivní (`oss_disabled`)
+
+  /api/v1/reports/oss:
+    get:
+      tags: [Reports]
+      summary: OSS XML export
+      description: EPO XML pro OSS EU režim (OSSEI1) z ručně označených řádků vydaných faktur. Běžná plnění generuje jako VetaR a opravy minulých období jako VetaO. Vyžaduje zapnutý OSS režim v nastavení firmy.
+      parameters:
+        - $ref: '#/components/parameters/SupplierIdHeader'
+        - { in: query, name: year, required: true, schema: { type: integer, minimum: 2020, maximum: 2050 } }
+        - { in: query, name: quarter, required: true, schema: { type: integer, minimum: 1, maximum: 4 } }
+      responses:
+        '200':
+          description: XML download
+          content:
+            application/xml: {}
+        '409':
+          description: OSS režim není v nastavení firmy aktivní (`oss_disabled`)
 
   /api/v1/logbook/cars:
     get:
@@ -5027,6 +5221,56 @@ components:
           schema: { $ref: '#/components/schemas/Error' }
 
   schemas:
+    OssPreview:
+      type: object
+      required: [period, settings, state, summary, countries, corrections, warnings]
+      properties:
+        period:
+          type: object
+          required: [year, quarter, start, end, label, submission_deadline]
+          properties:
+            year: { type: integer }
+            quarter: { type: integer, minimum: 1, maximum: 4 }
+            start: { type: string, format: date }
+            end: { type: string, format: date }
+            label: { type: string }
+            submission_deadline: { type: string, format: date }
+        settings: { type: object, additionalProperties: true }
+        state: { type: object, additionalProperties: true }
+        summary:
+          type: object
+          properties:
+            return_currency: { type: string, example: EUR }
+            total_base: { type: number }
+            total_vat: { type: number }
+            total_corrections: { type: number }
+            total_payable: { type: number }
+            invoice_count: { type: integer }
+            row_count: { type: integer }
+            correction_row_count: { type: integer }
+            invalid_correction_count: { type: integer }
+        countries:
+          type: array
+          items: { type: object, additionalProperties: true }
+        corrections:
+          type: array
+          items:
+            type: object
+            required: [period, year, quarter, state_consumption, correction, count, rows]
+            properties:
+              period: { type: string, pattern: '^[0-9]{4}Q[1-4]$' }
+              year: { type: integer }
+              quarter: { type: integer, minimum: 1, maximum: 4 }
+              state_consumption: { type: string, minLength: 2, maxLength: 2 }
+              correction: { type: number, description: "Rozdíl DPH v EUR, může být záporný." }
+              count: { type: integer }
+              rows:
+                type: array
+                items: { type: object, additionalProperties: true }
+        warnings:
+          type: array
+          items: { type: string }
+
     VatClassificationInput:
       type: object
       properties:
@@ -5144,9 +5388,9 @@ components:
         pension_cap: { type: number }
         vat_limit_low: { type: number, description: Limit obratu pro povinnou registraci DPH }
         vat_limit_high: { type: number }
-        vat_rate_standard: { type: number, description: Základní sazba DPH (%) — sloupce DPH výkazů, samovyměření RC, auto-klasifikace }
+        vat_rate_standard: { type: number, description: "Základní sazba DPH (%) — sloupce DPH výkazů, samovyměření RC, auto-klasifikace" }
         vat_rate_reduced: { type: number, description: Snížená sazba DPH (%) }
-        kh_item_threshold: { type: number, description: Limit KH (Kč vč. DPH) — nad limit doklad jednotlivě (A.4/B.2), do limitu sumace (A.5/B.3) }
+        kh_item_threshold: { type: number, description: "Limit KH (Kč vč. DPH) — nad limit doklad jednotlivě (A.4/B.2), do limitu sumace (A.5/B.3)" }
         pausal_annual:
           type: object
           description: Měsíční/roční částky paušální daně per pásmo
@@ -5185,7 +5429,7 @@ components:
       type: object
       properties:
         id: { type: integer }
-        parent_id: { type: integer, nullable: true }
+        parent_id: { type: [integer, "null"] }
         name: { type: string }
         created_at: { type: string }
         subfolder_count: { type: integer, description: "Naplněno jen v listingu potomků; jinak 0" }
@@ -5196,9 +5440,9 @@ components:
       properties:
         id: { type: integer }
         supplier_id: { type: integer }
-        folder_id: { type: integer, nullable: true }
+        folder_id: { type: [integer, "null"] }
         title: { type: string }
-        description: { type: string, nullable: true }
+        description: { type: [string, "null"] }
         original_name: { type: string }
         filename: { type: string, description: "Název souboru na disku ({sha8}-{safeName})" }
         sha256: { type: string }
@@ -5206,14 +5450,14 @@ components:
         size_bytes: { type: integer }
         doc_type: { type: string, enum: [pdf, docx, xlsx, xml, zfo, p7s, zip, image, other] }
         source: { type: string, enum: [manual, zfo_extract, zip_extract] }
-        parent_document_id: { type: integer, nullable: true }
-        signature_for_id: { type: integer, nullable: true }
+        parent_document_id: { type: [integer, "null"] }
+        signature_for_id: { type: [integer, "null"] }
         text_status: { type: string, enum: [none, extracted, unsupported, failed] }
         thumb_status: { type: string, enum: [none, generated, unsupported, failed] }
         has_thumb: { type: boolean }
-        uploaded_by: { type: integer, nullable: true, description: "User ID nahrávajícího" }
+        uploaded_by: { type: [integer, "null"], description: "User ID nahrávajícího" }
         created_at: { type: string }
-        deleted_at: { type: string, nullable: true, description: "Soft-delete (koš); NULL = aktivní" }
+        deleted_at: { type: [string, "null"], description: "Soft-delete (koš); NULL = aktivní" }
     DocumentLink:
       type: object
       properties:
@@ -5232,15 +5476,15 @@ components:
       type: object
       description: Metadata datové zprávy (ZFO) z ISDS
       properties:
-        dm_id: { type: string, nullable: true }
+        dm_id: { type: [string, "null"] }
         direction: { type: string, enum: [sent, received, unknown] }
-        sender_box_id: { type: string, nullable: true }
-        sender_name: { type: string, nullable: true }
-        recipient_box_id: { type: string, nullable: true }
-        recipient_name: { type: string, nullable: true }
-        annotation: { type: string, nullable: true, description: Předmět zprávy }
-        delivery_time: { type: string, nullable: true }
-        acceptance_time: { type: string, nullable: true }
+        sender_box_id: { type: [string, "null"] }
+        sender_name: { type: [string, "null"] }
+        recipient_box_id: { type: [string, "null"] }
+        recipient_name: { type: [string, "null"] }
+        annotation: { type: [string, "null"], description: Předmět zprávy }
+        delivery_time: { type: [string, "null"] }
+        acceptance_time: { type: [string, "null"] }
     DocumentDetail:
       allOf:
         - { $ref: '#/components/schemas/Document' }
@@ -5293,7 +5537,7 @@ components:
                 name: { type: string }
                 prefix: { type: string, example: "mi_pat_abcd" }
                 scope: { type: string, enum: [read, read_write] }
-                expires_at: { type: string, format: date-time, nullable: true }
+                expires_at: { type: [string, "null"], format: date-time }
             - { type: "null" }
 
     SupplierBrief:
@@ -5301,7 +5545,8 @@ components:
       properties:
         id: { type: integer }
         company_name: { type: string }
-        display_name: { type: string, nullable: true }
+        display_name: { type: [string, "null"] }
+        oss_enabled: { type: boolean }
 
     Country:
       type: object
@@ -5325,6 +5570,25 @@ components:
         amount: { type: number, format: float, example: 12500.50 }
         currency: { type: string, example: CZK }
 
+    BrandingProfile:
+      type: object
+      description: "Aktivní vizuální identita aktuálního dodavatele. Prázdná pole se při vystavení dědí z dodavatele."
+      properties:
+        id: { type: integer }
+        name: { type: string, description: "Interní název profilu" }
+        display_name: { type: [string, "null"] }
+        tagline: { type: [string, "null"] }
+        email: { type: [string, "null"], format: email }
+        reply_to: { type: [string, "null"], format: email }
+        phone: { type: [string, "null"] }
+        web: { type: [string, "null"] }
+        email_footer: { type: [string, "null"] }
+        logo_path: { type: [string, "null"], readOnly: true }
+        accent_color: { type: string, pattern: '^#[0-9A-Fa-f]{6}$' }
+        branding_enabled: { type: boolean, description: "Zapíná vlastní logo a barevný branding v e-mailech a PDF." }
+        pdf_logo_show_name: { type: boolean }
+        is_default: { type: boolean, readOnly: true, description: "Výchozí profil dodavatele použitý bez explicitní volby." }
+
     Client:
       type: object
       description: |
@@ -5335,38 +5599,39 @@ components:
         id: { type: integer }
         supplier_id: { type: integer }
         company_name: { type: string }
-        first_name: { type: string, nullable: true }
-        last_name: { type: string, nullable: true }
-        ic: { type: string, nullable: true, description: IČO (8 číslic) }
-        dic: { type: string, nullable: true, description: "DIČ / VAT ID s country prefixem (u SK klienta = IČ DPH)" }
-        tax_number: { type: string, nullable: true, description: "Národní daňové číslo bez prefixu (SK DIČ, DE/AT Steuernummer, PL NIP, HU Adószám) — issue #120" }
+        first_name: { type: [string, "null"] }
+        last_name: { type: [string, "null"] }
+        ic: { type: [string, "null"], description: IČO (8 číslic) }
+        dic: { type: [string, "null"], description: "DIČ / VAT ID s country prefixem (u SK klienta = IČ DPH)" }
+        tax_number: { type: [string, "null"], description: "Národní daňové číslo bez prefixu (SK DIČ, DE/AT Steuernummer, PL NIP, HU Adószám) — issue #120" }
         street: { type: string }
         city: { type: string }
         zip: { type: string }
         country_id: { type: integer }
         country_iso2: { type: string, description: "Denormalizovaný ISO2 kód země (alias z countries)" }
-        main_email: { type: string, format: email, description: "Hlavní email klienta — povinný. Bez e-mailových kontaktů (email_contacts) na něj chodí všechny zprávy; s kontakty slouží jako fallback a pro běžnou komunikaci." }
-        phone: { type: string, nullable: true }
+        main_email: { type: [string, "null"], format: email, description: "Volitelný hlavní email klienta. Bez e-mailových kontaktů (email_contacts) na něj chodí všechny zprávy; s kontakty slouží jako fallback a pro běžnou komunikaci." }
+        phone: { type: [string, "null"] }
         language: { type: string, enum: [cs, en], description: "Jazyk faktur a emailů. Default cs." }
-        currency_default_id: { type: integer, nullable: true, description: "Výchozí měna pro faktury klienta. Default = supplier.default_currency_id." }
+        currency_default_id: { type: [integer, "null"], description: "Výchozí měna pro faktury klienta. Default = supplier.default_currency_id." }
         currency_default: { type: string, description: "Denormalizovaný kód výchozí měny (alias z currencies)" }
-        vat_rate_default_id: { type: integer, nullable: true, description: "Legacy výchozí sazba DPH" }
-        hourly_rate: { type: number, format: float, nullable: true, description: "Default hodinová sazba (CZK / hod) pro projekty klienta" }
+        vat_rate_default_id: { type: [integer, "null"], description: "Legacy výchozí sazba DPH" }
+        hourly_rate: { type: [number, "null"], format: float, description: "Default hodinová sazba (CZK / hod) pro projekty klienta" }
         reverse_charge: { type: boolean, description: "Přenesená daňová povinnost — propisuje se do nových faktur." }
         is_customer: { type: boolean, description: "Role odběratele (vystavujeme mu faktury)" }
         is_vendor: { type: boolean, description: "Role dodavatele (evidujeme přijaté faktury)" }
         is_vat_payer: { type: boolean, description: "Plátce DPH (ověřitelné přes /clients/{id}/vat-status)" }
         auto_send_reminders: { type: boolean, description: "Automatické odesílání upomínek" }
-        payment_due_default: { type: integer, nullable: true, description: "Default splatnost pro nové faktury klienta" }
-        payment_due_unit: { type: string, enum: [days, month], nullable: true, description: "Jednotka splatnosti (dny / konec měsíce)" }
-        note: { type: string, nullable: true }
-        default_expense_category_id: { type: integer, nullable: true, description: "Default kategorie nákladu pro přijaté faktury dodavatele" }
-        default_revenue_category_id: { type: integer, nullable: true, description: "Default kategorie tržby pro vydané faktury odběratele" }
-        invoice_number_format: { type: string, nullable: true, description: "Per-klient override číselné řady faktur" }
-        proforma_number_format: { type: string, nullable: true }
-        credit_note_number_format: { type: string, nullable: true }
-        invoice_number_period: { type: string, enum: [year, month, none], nullable: true }
-        archived_at: { type: string, format: date-time, nullable: true, description: "NULL = aktivní; vyplněno = archivováno" }
+        payment_due_default: { type: [integer, "null"], description: "Default splatnost pro nové faktury klienta" }
+        payment_due_unit: { type: [string, "null"], enum: [days, month, null], description: "Jednotka splatnosti (dny / konec měsíce)" }
+        note: { type: [string, "null"] }
+        default_expense_category_id: { type: [integer, "null"], description: "Default kategorie nákladu pro přijaté faktury dodavatele" }
+        default_revenue_category_id: { type: [integer, "null"], description: "Default kategorie tržby pro vydané faktury odběratele" }
+        invoice_number_format: { type: [string, "null"], description: "Per-klient override číselné řady faktur" }
+        proforma_number_format: { type: [string, "null"] }
+        credit_note_number_format: { type: [string, "null"] }
+        invoice_number_period: { type: [string, "null"], enum: [year, month, none, null] }
+        default_branding_profile_id: { type: [integer, "null"], description: "Výchozí brandingový profil pro nové vydané faktury klienta." }
+        archived_at: { type: [string, "null"], format: date-time, description: "NULL = aktivní; vyplněno = archivováno" }
         created_at: { type: string, format: date-time }
         updated_at: { type: string, format: date-time }
 
@@ -5376,8 +5641,8 @@ components:
       properties:
         id: { type: integer, readOnly: true }
         email: { type: string, format: email }
-        label: { type: string, nullable: true, maxLength: 80, description: 'Popisek (např. „účetní oddělení")' }
-        contact_name: { type: string, nullable: true, maxLength: 120, description: "Jméno kontaktní osoby" }
+        label: { type: [string, "null"], maxLength: 80, description: 'Popisek (např. „účetní oddělení")' }
+        contact_name: { type: [string, "null"], maxLength: 120, description: "Jméno kontaktní osoby" }
         is_active: { type: boolean, default: true }
         sort_order: { type: integer, readOnly: true, description: "Pořadí — odvozeno z pořadí v zaslaném poli" }
         usages:
@@ -5429,8 +5694,8 @@ components:
               items:
                 type: object
                 properties:
-                  project_id: { type: integer, nullable: true }
-                  project_name: { type: string, nullable: true }
+                  project_id: { type: [integer, "null"] }
+                  project_name: { type: [string, "null"] }
                   currency: { type: string }
                   total: { type: number, format: float }
                   count: { type: integer }
@@ -5447,38 +5712,39 @@ components:
 
     ClientInput:
       type: object
-      required: [company_name, street, city, zip, main_email]
+      required: [company_name, street, city, zip]
       properties:
         company_name: { type: string }
-        first_name: { type: string, nullable: true }
-        last_name: { type: string, nullable: true }
-        ic: { type: string, nullable: true, description: "IČO — 8 číslic" }
-        dic: { type: string, nullable: true, description: "DIČ / VAT ID s country prefixem (u SK = IČ DPH)" }
-        tax_number: { type: string, nullable: true, description: "Národní daňové číslo bez prefixu (SK DIČ, DE/AT Steuernummer, PL NIP, HU Adószám)" }
+        first_name: { type: [string, "null"] }
+        last_name: { type: [string, "null"] }
+        ic: { type: [string, "null"], description: "IČO — 8 číslic" }
+        dic: { type: [string, "null"], description: "DIČ / VAT ID s country prefixem (u SK = IČ DPH)" }
+        tax_number: { type: [string, "null"], description: "Národní daňové číslo bez prefixu (SK DIČ, DE/AT Steuernummer, PL NIP, HU Adószám)" }
         street: { type: string }
         city: { type: string }
         zip: { type: string }
         country_iso2: { type: string, default: CZ, description: "ISO2 kód země (resolvuje se na country_id). POZOR: vstup je `country_iso2`, ne `country_id`." }
-        main_email: { type: string, format: email, description: "Hlavní email — povinný (POZOR: backend pole se jmenuje `main_email`, ne `email`)" }
-        phone: { type: string, nullable: true, maxLength: 40 }
+        main_email: { type: [string, "null"], format: email, description: "Volitelný hlavní email (POZOR: backend pole se jmenuje `main_email`, ne `email`)" }
+        phone: { type: [string, "null"], maxLength: 40 }
         language: { type: string, enum: [cs, en], default: cs }
-        currency_default_id: { type: integer, nullable: true, description: "Výchozí měna klienta. Pokud chybí, použije se výchozí měna supplier-a." }
+        currency_default_id: { type: [integer, "null"], description: "Výchozí měna klienta. Pokud chybí, použije se výchozí měna supplier-a." }
         currency_default: { type: string, description: "Legacy — kód měny (CZK…). Použij currency_default_id." }
-        hourly_rate: { type: number, format: float, nullable: true, description: "Default hodinová sazba pro nové projekty (≥ 0)" }
+        hourly_rate: { type: [number, "null"], format: float, description: "Default hodinová sazba pro nové projekty (≥ 0)" }
         reverse_charge: { type: boolean, default: false }
         is_customer: { type: boolean, default: true, description: "Role odběratele. Aspoň jedna z is_customer/is_vendor musí zůstat true." }
         is_vendor: { type: boolean, default: false, description: "Role dodavatele." }
         is_vat_payer: { type: boolean, default: true }
         auto_send_reminders: { type: boolean, default: true }
         payment_due_default: { type: integer, minimum: 1, maximum: 365, description: "Default splatnost" }
-        payment_due_unit: { type: string, enum: [days, month], nullable: true }
-        note: { type: string, nullable: true }
-        default_expense_category_id: { type: integer, nullable: true }
-        default_revenue_category_id: { type: integer, nullable: true }
-        invoice_number_format: { type: string, nullable: true, maxLength: 60 }
-        proforma_number_format: { type: string, nullable: true }
-        credit_note_number_format: { type: string, nullable: true }
-        invoice_number_period: { type: string, enum: [year, month, none], nullable: true }
+        payment_due_unit: { type: [string, "null"], enum: [days, month, null] }
+        note: { type: [string, "null"] }
+        default_expense_category_id: { type: [integer, "null"] }
+        default_revenue_category_id: { type: [integer, "null"] }
+        invoice_number_format: { type: [string, "null"], maxLength: 60 }
+        proforma_number_format: { type: [string, "null"] }
+        credit_note_number_format: { type: [string, "null"] }
+        invoice_number_period: { type: [string, "null"], enum: [year, month, none, null] }
+        default_branding_profile_id: { type: [integer, "null"], description: "Volitelný výchozí brandingový profil; musí patřit aktuálnímu supplier-ovi." }
         email_contacts:
           type: array
           description: "E-mailové kontakty dle účelu (#86) — replace-all: pošli kompletní pole; klíč vynech, pokud kontakty neměníš. Max 10 kontaktů."
@@ -5489,14 +5755,15 @@ components:
       properties:
         id: { type: integer }
         supplier_id: { type: integer }
+        branding_profile_id: { type: [integer, "null"], description: "Vizuální identita dokladu; při vystavení se uloží do supplier_snapshot." }
         client_id: { type: integer }
         client_company_name: { type: string, description: "Denormalizováno z klienta pro pohodlí výpisů" }
-        client_main_email: { type: string, format: email, nullable: true }
-        project_id: { type: integer, nullable: true }
-        project_name: { type: string, nullable: true }
-        parent_invoice_id: { type: integer, nullable: true, description: "Pro credit_note / cancellation / final-z-proformy odkaz na původní fakturu" }
-        recurring_template_id: { type: integer, nullable: true, description: "Pro faktury vygenerované ze šablony pravidelné fakturace — odkaz na šablonu (NULL pokud byla šablona smazána, viz ON DELETE SET NULL)." }
-        varsymbol: { type: string, nullable: true, description: "Variabilní symbol = číslo faktury. Přiděluje se při issue (u draft je null nebo manuální override)." }
+        client_main_email: { type: [string, "null"], format: email }
+        project_id: { type: [integer, "null"] }
+        project_name: { type: [string, "null"] }
+        parent_invoice_id: { type: [integer, "null"], description: "Pro credit_note / cancellation / final-z-proformy odkaz na původní fakturu" }
+        recurring_template_id: { type: [integer, "null"], description: "Pro faktury vygenerované ze šablony pravidelné fakturace — odkaz na šablonu (NULL pokud byla šablona smazána, viz ON DELETE SET NULL)." }
+        varsymbol: { type: [string, "null"], description: "Variabilní symbol = číslo faktury. Přiděluje se při issue (u draft je null nebo manuální override)." }
         invoice_type:
           type: string
           enum: [invoice, proforma, credit_note, cancellation, tax_document]
@@ -5505,9 +5772,8 @@ components:
           type: string
           enum: [draft, issued, sent, reminded, paid, cancelled]
         payment_status:
-          type: string
-          nullable: true
-          enum: [unpaid, partially_paid, paid, overpaid]
+          type: [string, "null"]
+          enum: [unpaid, partially_paid, paid, overpaid, null]
           description: "Odvozený platební stav (#89) z paid_total vs. amount_to_pay (tolerance 0,05). Null pro draft/cancelled."
         payment_method:
           type: string
@@ -5518,21 +5784,21 @@ components:
         reverse_charge: { type: boolean }
         prices_include_vat: { type: boolean, description: "Ceny položek zadané včetně DPH (DPH se počítá shora koeficientem). Per-doklad, migrace 0083." }
         auto_send_reminders: { type: boolean, description: "Per-faktura přepínač automatických upomínek (migrace 0088). False = cron tuto fakturu přeskočí, i když má dodavatel i klient upomínky zapnuté." }
-        client_ic: { type: string, nullable: true, description: "Denormalizováno z klienta" }
-        client_dic: { type: string, nullable: true }
-        revenue_category_id: { type: integer, nullable: true, description: "FK do /revenue-categories — kategorie tržby pro CRM/Grafy" }
-        revenue_category_label: { type: string, nullable: true, description: "Denormalizovaný label kategorie tržby" }
-        revenue_category_code: { type: string, nullable: true }
-        revenue_category: { type: string, nullable: true, description: "Legacy volný textový tag (nahrazeno revenue_category_id)" }
-        vat_classification_code: { type: string, nullable: true, description: "Hlavičkový default kódu klasifikace plnění (DPHDP3 / KH)" }
+        client_ic: { type: [string, "null"], description: "Denormalizováno z klienta" }
+        client_dic: { type: [string, "null"] }
+        revenue_category_id: { type: [integer, "null"], description: "FK do /revenue-categories — kategorie tržby pro CRM/Grafy" }
+        revenue_category_label: { type: [string, "null"], description: "Denormalizovaný label kategorie tržby" }
+        revenue_category_code: { type: [string, "null"] }
+        revenue_category: { type: [string, "null"], description: "Legacy volný textový tag (nahrazeno revenue_category_id)" }
+        vat_classification_code: { type: [string, "null"], description: "Hlavičkový default kódu klasifikace plnění (DPHDP3 / KH)" }
         issue_date: { type: string, format: date }
         due_date: { type: string, format: date }
-        tax_date: { type: string, format: date, nullable: true, description: "DUZP — null u proforem" }
+        tax_date: { type: [string, "null"], format: date, description: "DUZP — null u proforem" }
         currency_id: { type: integer, description: "FK do /settings/currencies (per-supplier)" }
         currency: { type: string, example: CZK, description: "Denormalizovaný kód měny (= currencies.code)" }
         currency_symbol: { type: string, example: "Kč" }
-        exchange_rate: { type: number, format: float, nullable: true, description: "CZK / 1 jednotka cizí měny (ČNB). NULL = neaplikováno (např. faktura v CZK)" }
-        exchange_rate_date: { type: string, format: date, nullable: true }
+        exchange_rate: { type: [number, "null"], format: float, description: "CZK / 1 jednotka cizí měny (ČNB). NULL = neaplikováno (např. faktura v CZK)" }
+        exchange_rate_date: { type: [string, "null"], format: date }
         total_without_vat: { type: number, format: float }
         total_vat: { type: number, format: float }
         total_with_vat: { type: number, format: float }
@@ -5565,20 +5831,20 @@ components:
               vat:  { type: number, format: float }
               total: { type: number, format: float }
         czk_recap:
-          nullable: true
           description: "CZK rekapitulace u cizoměnových faktur (null pokud měna == CZK nebo není zafixován kurz)"
-          type: object
-        note: { type: string, nullable: true, description: "Generická poznámka. Pro výstup viz note_above_items / note_below_items." }
-        note_above_items: { type: string, nullable: true }
-        note_below_items: { type: string, nullable: true }
-        bank_account_number: { type: string, nullable: true, description: "Z currencies (per-měna bank účet supplier-a)" }
-        bank_code: { type: string, nullable: true }
-        bank_iban: { type: string, nullable: true }
-        bank_bic: { type: string, nullable: true }
+          type: [object, "null"]
+        note: { type: [string, "null"], description: "Generická poznámka. Pro výstup viz note_above_items / note_below_items." }
+        note_above_items: { type: [string, "null"] }
+        note_below_items: { type: [string, "null"] }
+        bank_account_number: { type: [string, "null"], description: "Z currencies (per-měna bank účet supplier-a)" }
+        bank_code: { type: [string, "null"] }
+        bank_iban: { type: [string, "null"] }
+        bank_bic: { type: [string, "null"] }
         approval_status:
-          type: string
-          nullable: true
-          enum: [none, requested, approved, rejected]
+          type: [string, "null"]
+          enum: [none, requested, approved, rejected, null]
+        public_token: { type: [string, "null"], description: "Token trvalého veřejného odkazu „web faktura\" (/invoice/{token}); null dokud odkaz nevznikl. Viz POST /invoices/{id}/public-link." }
+        public_viewed_at: { type: [string, "null"], format: date-time, description: "Poslední zobrazení web faktury klientem (anonymní přístup); null = klient ji zatím neotevřel." }
         items:
           type: array
           items: { $ref: '#/components/schemas/InvoiceItem' }
@@ -5588,22 +5854,20 @@ components:
             type: object
             properties:
               email: { type: string, format: email }
-              label: { type: string, nullable: true }
+              label: { type: [string, "null"] }
         final_invoice:
-          type: object
-          nullable: true
+          type: [object, "null"]
           description: "Jen u proformy — navázaný finální daňový doklad ({ id, varsymbol, status })"
         parent_invoice:
-          type: object
-          nullable: true
+          type: [object, "null"]
           description: "Jen pokud je parent_invoice_id ({ id, varsymbol, status, invoice_type })"
         has_advance_candidates: { type: boolean, description: "UI flag — existují nespárované zálohy k propojení" }
         has_final_candidates: { type: boolean }
-        sent_at: { type: string, format: date-time, nullable: true, description: "Kdy byla naposledy odeslána emailem" }
-        last_reminder_at: { type: string, format: date-time, nullable: true }
+        sent_at: { type: [string, "null"], format: date-time, description: "Kdy byla naposledy odeslána emailem" }
+        last_reminder_at: { type: [string, "null"], format: date-time }
         reminder_count: { type: integer, description: "Počet odeslaných upomínek" }
-        paid_at: { type: string, format: date, nullable: true }
-        cancelled_at: { type: string, format: date-time, nullable: true }
+        paid_at: { type: [string, "null"], format: date }
+        cancelled_at: { type: [string, "null"], format: date-time }
         created_at: { type: string, format: date-time }
         updated_at: { type: string, format: date-time }
 
@@ -5615,15 +5879,16 @@ components:
         Vystavená/zaplacená/storno faktura nelze upravovat — vrátí 409.
       properties:
         client_id: { type: integer, description: "Musí patřit aktuálnímu supplier-ovi" }
-        project_id: { type: integer, nullable: true, description: "Pokud uvedeno, musí patřit `client_id`" }
-        parent_invoice_id: { type: integer, nullable: true, description: "Jen při create (credit_note / final-z-proformy). Na UPDATE se ignoruje." }
+        project_id: { type: [integer, "null"], description: "Pokud uvedeno, musí patřit `client_id`" }
+        branding_profile_id: { type: [integer, "null"], description: "Volitelný brandingový profil stejného supplier-a; bez pole se použije výchozí profil klienta." }
+        parent_invoice_id: { type: [integer, "null"], description: "Jen při create (credit_note / final-z-proformy). Na UPDATE se ignoruje." }
         invoice_type:
           type: string
           enum: [invoice, proforma, credit_note, cancellation]
           default: invoice
         issue_date: { type: string, format: date, description: "Default = dnes" }
         due_date: { type: string, format: date, description: "Default = issue_date + payment_due_days (z projektu/klienta/supplier)" }
-        tax_date: { type: string, format: date, nullable: true, description: "DUZP. U proform se ignoruje (uloží se null)." }
+        tax_date: { type: [string, "null"], format: date, description: "DUZP. U proform se ignoruje (uloží se null)." }
         currency_id: { type: integer, description: "FK do /settings/currencies (per-supplier). Default = výchozí měna projektu/klienta/supplier." }
         currency:
           type: string
@@ -5634,12 +5899,11 @@ components:
         reverse_charge: { type: boolean, description: "Přenesená daňová povinnost. Default = z klienta." }
         prices_include_vat: { type: boolean, default: false, description: "Ceny položek zadané včetně DPH (DPH shora koeficientem)." }
         auto_send_reminders: { type: boolean, default: true, description: "Per-faktura přepínač automatických upomínek (migrace 0088). False = cron tuto fakturu přeskočí." }
-        revenue_category_id: { type: integer, nullable: true, description: "Kategorie tržby. Když chybí, na create se odvodí z defaultu projektu/klienta." }
-        vat_classification_code: { type: string, nullable: true, description: "Hlavičkový default klasifikace plnění; auto-default podle sazby/RC/země, pokud prázdné." }
+        revenue_category_id: { type: [integer, "null"], description: "Kategorie tržby. Když chybí, na create se odvodí z defaultu projektu/klienta." }
+        vat_classification_code: { type: [string, "null"], description: "Hlavičkový default klasifikace plnění; auto-default podle sazby/RC/země, pokud prázdné." }
         varsymbol:
-          type: string
+          type: [string, "null"]
           maxLength: 20
-          nullable: true
           description: "Volitelný manuální override automatického číslování. U draftu lze ponechat null — číslo se přidělí při /issue."
         advance_paid_amount: { type: number, format: float, default: 0, description: "Záloha k odečtení od total_with_vat" }
         discount_percent:
@@ -5658,10 +5922,10 @@ components:
           enum: [bank_transfer, card, cash, other]
           default: bank_transfer
           description: "Způsob úhrady. Pro card/cash se v PDF/emailu nevygeneruje QR ani bankovní spojení."
-        exchange_rate: { type: number, format: float, nullable: true, description: "Volitelný manuální override ČNB kurzu (CZK / 1 jednotka cizí měny)" }
-        note: { type: string, nullable: true, description: "Generická poznámka (mapuje se na note_below_items pokud není uvedeno jinak)" }
-        note_above_items: { type: string, nullable: true }
-        note_below_items: { type: string, nullable: true }
+        exchange_rate: { type: [number, "null"], format: float, description: "Volitelný manuální override ČNB kurzu (CZK / 1 jednotka cizí měny)" }
+        note: { type: [string, "null"], description: "Generická poznámka (mapuje se na note_below_items pokud není uvedeno jinak)" }
+        note_above_items: { type: [string, "null"] }
+        note_below_items: { type: [string, "null"] }
         items:
           type: array
           items: { $ref: '#/components/schemas/InvoiceItemInput' }
@@ -5672,10 +5936,9 @@ components:
       properties:
         position: { type: integer, minimum: 1, maximum: 3 }
         email: { type: string, format: email }
-        label: { type: string, nullable: true, example: "účetní" }
+        label: { type: [string, "null"], example: "účetní" }
         usages:
-          type: array
-          nullable: true
+          type: [array, "null"]
           description: "Typy zpráv, pro které se e-mail použije (#86). NULL / prázdné / všechny tři = všechny typy (default, zpětně kompatibilní)."
           items: { type: string, enum: [documents, reminders, approvals] }
 
@@ -5690,14 +5953,14 @@ components:
         currency: { type: string, example: CZK }
         hourly_rate: { type: number, format: float, example: 1500 }
         payment_due_days: { type: integer, example: 14 }
-        payment_due_unit: { type: string, enum: [days, month], nullable: true, description: "Jednotka splatnosti (NULL = dny)" }
-        project_number: { type: string, nullable: true }
-        contract_number: { type: string, nullable: true }
-        budget_total:   { type: number, nullable: true }
-        budget_yearly:  { type: number, nullable: true }
-        budget_monthly: { type: number, nullable: true }
-        default_revenue_category_id: { type: integer, nullable: true, description: "Default kategorie tržby pro faktury zakázky" }
-        archived_at: { type: string, format: date-time, nullable: true }
+        payment_due_unit: { type: [string, "null"], enum: [days, month, null], description: "Jednotka splatnosti (NULL = dny)" }
+        project_number: { type: [string, "null"] }
+        contract_number: { type: [string, "null"] }
+        budget_total:   { type: [number, "null"] }
+        budget_yearly:  { type: [number, "null"] }
+        budget_monthly: { type: [number, "null"] }
+        default_revenue_category_id: { type: [integer, "null"], description: "Default kategorie tržby pro faktury zakázky" }
+        archived_at: { type: [string, "null"], format: date-time }
 
     Project:
       allOf:
@@ -5706,9 +5969,9 @@ components:
           properties:
             client_id: { type: integer, format: int64 }
             client_company_name: { type: string }
-            client_main_email: { type: string, format: email, nullable: true }
+            client_main_email: { type: [string, "null"], format: email }
             supplier_id: { type: integer }
-            note: { type: string, nullable: true }
+            note: { type: [string, "null"] }
             requires_work_report_approval: { type: boolean }
             billing_emails:
               type: array
@@ -5791,33 +6054,26 @@ components:
           maximum: 365
           example: 14
         payment_due_unit:
-          type: string
-          enum: [days, month]
-          nullable: true
+          type: [string, "null"]
+          enum: [days, month, null]
         default_revenue_category_id:
-          type: integer
-          nullable: true
+          type: [integer, "null"]
           description: "Default kategorie tržby (musí patřit tenantovi); zpětně doplní existující faktury zakázky."
         project_number:
-          type: string
+          type: [string, "null"]
           maxLength: 50
-          nullable: true
         contract_number:
-          type: string
+          type: [string, "null"]
           maxLength: 50
-          nullable: true
         budget_total:
-          type: number
+          type: [number, "null"]
           format: float
-          nullable: true
         budget_yearly:
-          type: number
+          type: [number, "null"]
           format: float
-          nullable: true
         budget_monthly:
-          type: number
+          type: [number, "null"]
           format: float
-          nullable: true
         requires_work_report_approval:
           type: boolean
           default: false
@@ -5825,8 +6081,7 @@ components:
             Pokud `true`, faktury z této zakázky vyžadují schválení výkazu
             víceprací zákazníkem před vystavením.
         note:
-          type: string
-          nullable: true
+          type: [string, "null"]
         billing_emails:
           type: array
           maxItems: 3
@@ -5851,7 +6106,7 @@ components:
         rate:  { type: number, format: float, example: 1500 }
         total_amount: { type: number, format: float, example: 12750, description: hours × rate }
         order_index: { type: integer, example: 1 }
-        work_date: { type: string, format: date, nullable: true, description: "Datum provedení úkonu (volitelné)" }
+        work_date: { type: [string, "null"], format: date, description: "Datum provedení úkonu (volitelné)" }
 
     WorkReportItemInput:
       type: object
@@ -5868,7 +6123,7 @@ components:
       properties:
         id: { type: integer, format: int64 }
         invoice_id: { type: integer, format: int64 }
-        project_id: { type: integer, format: int64, nullable: true }
+        project_id: { type: [integer, "null"], format: int64 }
         title: { type: string, example: "Květen 2026 — vývoj backendu" }
         total_hours: { type: number, format: float }
         total_amount: { type: number, format: float }
@@ -5883,8 +6138,7 @@ components:
       required: [title, items]
       properties:
         project_id:
-          type: integer
-          nullable: true
+          type: [integer, "null"]
           description: |
             Volitelné — pokud faktura má `project_id`, výkaz se na něj naváže
             automaticky. Pro faktury bez zakázky nechej `null`.
@@ -5913,7 +6167,7 @@ components:
         size_bytes: { type: integer }
         sha256: { type: string, example: "9f86d081…" }
         created_at: { type: string, format: date-time }
-        created_by_user_id: { type: integer, nullable: true }
+        created_by_user_id: { type: [integer, "null"] }
 
     InvoiceAttachment:
       type: object
@@ -5953,11 +6207,10 @@ components:
         valid: { type: boolean }
         vat_id: { type: string, example: "DE123456789" }
         country_code: { type: string, example: "DE" }
-        name: { type: string, nullable: true }
-        address: { type: string, nullable: true }
+        name: { type: [string, "null"] }
+        address: { type: [string, "null"] }
         consultation_number:
-          type: string
-          nullable: true
+          type: [string, "null"]
           description: |
             VIES consultation number — důkazní záznam pro daňovou kontrolu, že DIČ
             byl k danému datu platný.
@@ -5974,17 +6227,16 @@ components:
           type: string
           example: "invoice.issued"
           description: "Tečka-separátor: entity.verb (např. invoice.paid, project.archived, auth.login)"
-        entity_type: { type: string, nullable: true, example: "invoice" }
-        entity_id:   { type: integer, format: int64, nullable: true }
-        user_id:     { type: integer, format: int64, nullable: true, description: "Null = systémová akce (cron)" }
-        user_email:  { type: string, format: email, nullable: true }
+        entity_type: { type: [string, "null"], example: "invoice" }
+        entity_id:   { type: [integer, "null"], format: int64 }
+        user_id:     { type: [integer, "null"], format: int64, description: "Null = systémová akce (cron)" }
+        user_email:  { type: [string, "null"], format: email }
         payload:
-          type: object
+          type: [object, "null"]
           additionalProperties: true
-          nullable: true
           description: Akce-specifické metadata (citlivá pole se redaktují)
-        ip:         { type: string, nullable: true, example: "203.0.113.42" }
-        user_agent: { type: string, nullable: true }
+        ip:         { type: [string, "null"], example: "203.0.113.42" }
+        user_agent: { type: [string, "null"] }
         created_at: { type: string, format: date-time }
 
     DashboardSummary:
@@ -6016,7 +6268,7 @@ components:
                   this_year: { type: number }
                   prev_year: { type: number }
                   prev_year_ytd: { type: number, description: "Obrat loni do stejného dne v roce (pro fair YoY)" }
-                  change_pct: { type: number, nullable: true, description: "Letošek vs prev_year_ytd v %" }
+                  change_pct: { type: [number, "null"], description: "Letošek vs prev_year_ytd v %" }
                   this_year_invoice_count: { type: integer }
                   prev_year_invoice_count: { type: integer }
                   this_year_client_count: { type: integer, description: "DISTINCT klienti v této měně (letos)" }
@@ -6033,7 +6285,7 @@ components:
                   currency: { type: string }
                   count: { type: integer }
                   total: { type: number }
-            avg_payment_days: { type: number, nullable: true }
+            avg_payment_days: { type: [number, "null"] }
             status_counts_ytd:
               type: object
               additionalProperties: { type: integer }
@@ -6050,12 +6302,12 @@ components:
             type: object
             properties:
               id: { type: integer }
-              varsymbol: { type: string, nullable: true }
+              varsymbol: { type: [string, "null"] }
               invoice_type: { type: string }
               client_id: { type: integer }
               client_company_name: { type: string }
-              project_id: { type: integer, nullable: true }
-              project_name: { type: string, nullable: true, description: "Název zakázky (NULL = bez zakázky)." }
+              project_id: { type: [integer, "null"] }
+              project_name: { type: [string, "null"], description: "Název zakázky (NULL = bez zakázky)." }
               currency: { type: string }
               issue_date: { type: string, format: date }
               total_with_vat: { type: number }
@@ -6204,7 +6456,7 @@ components:
                   label: { type: string }
                   count: { type: integer }
             total: { type: integer }
-            avg_days: { type: number, nullable: true }
+            avg_days: { type: [number, "null"] }
         vat_breakdown_12m:
           type: array
           description: |
@@ -6316,30 +6568,30 @@ components:
       description: "QR platba + bankovní účet přijaté faktury (GET/POST/PUT na /purchase-invoices/{id}/payment-qr resp. /payment-account)."
       properties:
         ok: { type: boolean }
-        qr_data_uri: { type: string, nullable: true, description: "QR jako data URI (PNG)." }
-        source: { type: string, nullable: true, enum: [manual, isdoc, ai_reextract, qr_image] }
+        qr_data_uri: { type: [string, "null"], description: "QR jako data URI (PNG)." }
+        source: { type: [string, "null"], enum: [manual, isdoc, ai_reextract, qr_image, null] }
         amount: { type: number }
         currency: { type: string }
         account:
           type: object
           properties:
-            account_number: { type: string, nullable: true }
-            bank_code: { type: string, nullable: true }
-            iban: { type: string, nullable: true }
-            bic: { type: string, nullable: true }
-            variable_symbol: { type: string, nullable: true }
+            account_number: { type: [string, "null"] }
+            bank_code: { type: [string, "null"] }
+            iban: { type: [string, "null"] }
+            bic: { type: [string, "null"] }
+            variable_symbol: { type: [string, "null"] }
         editable: { type: boolean }
         needs_account: { type: boolean }
-        can_extract: { type: boolean, nullable: true }
+        can_extract: { type: [boolean, "null"] }
 
     WorkReportLinkStatus:
       type: object
       description: "Stav veřejného sledovacího odkazu na výkaz (klient/zakázka)."
       properties:
         exists: { type: boolean }
-        url: { type: string, nullable: true }
-        last_sent_at: { type: string, format: date-time, nullable: true }
-        last_viewed_at: { type: string, format: date-time, nullable: true }
+        url: { type: [string, "null"] }
+        last_sent_at: { type: [string, "null"], format: date-time }
+        last_viewed_at: { type: [string, "null"], format: date-time }
 
     WorkReportLinkRecipients:
       type: object
@@ -6355,22 +6607,23 @@ components:
       description: "Položka seznamu výpisů (GET /bank-statements). Bankovní spojení dodavatele je per-měna na /settings/currencies, ne tady."
       properties:
         id: { type: integer, format: int64 }
-        source: { type: string, enum: [gpc, email_notice], description: "Původ výpisu: gpc = oficiální GPC/ABO výpis z banky, email_notice = virtuální výpis složený z e-mailových bankovních avíz." }
+        source: { type: string, enum: [gpc, pdf, email_notice, idoklad], description: "Původ výpisu: gpc = oficiální GPC/ABO výpis z banky, pdf = výpis rozparsovaný z PDF (banka bez GPC exportu), email_notice = virtuální výpis složený z e-mailových bankovních avíz, idoklad = virtuální výpis z bankovních pohybů importovaných z iDokladu. gpc a pdf jsou autoritativní; u shodné platby ze sekundárního zdroje se úhrada převede na ně a sekundární pohyb dostane match_status=ignored." }
         file_name: { type: string, example: "vypis_2026_05.gpc" }
         account_number: { type: string, example: "1234567890/0100" }
-        bank_code: { type: string, nullable: true, example: "0100", description: "Kód banky účtu — autoritativně z konfigurovaného účtu (currencies.bank_code), fallback z výpisu. GPC výpisy ho samy nenesou." }
-        currency: { type: string, nullable: true, example: EUR, description: "ISO 4217. Odvozeno z transakcí výpisu nebo z currencies.account_number. NULL u výpisů importovaných před v4.1.0." }
+        bank_code: { type: [string, "null"], example: "0100", description: "Kód banky účtu — autoritativně z konfigurovaného účtu (currencies.bank_code), fallback z výpisu. GPC výpisy ho samy nenesou." }
+        currency: { type: [string, "null"], example: EUR, description: "ISO 4217. Odvozeno z transakcí výpisu nebo z currencies.account_number. NULL u výpisů importovaných před v4.1.0." }
         statement_date: { type: string, format: date }
-        statement_number: { type: string, nullable: true }
+        statement_number: { type: [string, "null"] }
         prev_balance: { type: number, format: float }
         curr_balance: { type: number, format: float }
         transaction_count: { type: integer }
         matched_count: { type: integer }
+        ignored_count: { type: integer, description: "Počet položek s match_status=ignored — typicky pohyby sekundárního zdroje, jejichž úhradu převzal oficiální GPC/PDF výpis." }
         imported_at: { type: string, format: date-time }
         has_file: { type: boolean, description: "True pokud server má uložený originál výpisu — ke stažení přes /bank-statements/{id}/download." }
         has_pdf: { type: boolean, description: "True pokud je nahrán doprovodný PDF výpis." }
-        pdf_name: { type: string, nullable: true }
-        account_label: { type: string, nullable: true, description: "Odvozeno z currencies.label" }
+        pdf_name: { type: [string, "null"] }
+        account_label: { type: [string, "null"], description: "Odvozeno z currencies.label" }
 
     BankStatementDetail:
       allOf:
@@ -6378,9 +6631,9 @@ components:
         - type: object
           properties:
             file_hash: { type: string, description: "SHA-256 originálního souboru" }
-            credit_total: { type: number, format: float, nullable: true }
-            debit_total: { type: number, format: float, nullable: true }
-            imported_by: { type: integer, nullable: true, description: "User ID importujícího" }
+            credit_total: { type: [number, "null"], format: float }
+            debit_total: { type: [number, "null"], format: float }
+            imported_by: { type: [integer, "null"], description: "User ID importujícího" }
             transactions:
               type: array
               items: { $ref: '#/components/schemas/BankTransaction' }
@@ -6392,28 +6645,28 @@ components:
         statement_id: { type: integer, format: int64 }
         posted_at: { type: string, format: date }
         amount: { type: number, format: float, example: 12500.00 }
-        balance: { type: number, format: float, nullable: true, description: "Disponibilní zůstatek účtu z e-mailového avíza (Creditas/Fio/RB); u transakcí z GPC výpisu null." }
-        currency: { type: string, nullable: true, example: CZK }
-        variable_symbol: { type: string, nullable: true }
-        constant_symbol: { type: string, nullable: true }
-        specific_symbol: { type: string, nullable: true }
-        counterparty_account: { type: string, nullable: true }
-        counterparty_bank: { type: string, nullable: true }
-        counterparty_name: { type: string, nullable: true }
-        description: { type: string, nullable: true }
-        bank_ref: { type: string, nullable: true, description: "Bankovní referenční ID transakce" }
+        balance: { type: [number, "null"], format: float, description: "Disponibilní zůstatek účtu z e-mailového avíza (Creditas/Fio/RB); u transakcí z GPC výpisu null." }
+        currency: { type: [string, "null"], example: CZK }
+        variable_symbol: { type: [string, "null"] }
+        constant_symbol: { type: [string, "null"] }
+        specific_symbol: { type: [string, "null"] }
+        counterparty_account: { type: [string, "null"] }
+        counterparty_bank: { type: [string, "null"] }
+        counterparty_name: { type: [string, "null"] }
+        description: { type: [string, "null"] }
+        bank_ref: { type: [string, "null"], description: "Bankovní referenční ID transakce" }
         match_status:
           type: string
           enum: [unmatched, auto_exact, auto_partial, manual, ignored]
           description: "Stav párování. auto_* = automatika, manual = ruční přiřazení."
-        matched_invoice_id: { type: integer, format: int64, nullable: true, description: "Spárovaná VYDANÁ faktura" }
-        matched_purchase_invoice_id: { type: integer, format: int64, nullable: true, description: "Spárovaná PŘIJATÁ faktura (z payment_matches; jen v detailu)" }
-        matched_varsymbol: { type: string, nullable: true }
-        matched_invoice_amount: { type: number, format: float, nullable: true }
-        client_id: { type: integer, nullable: true }
-        matched_client_name: { type: string, nullable: true }
-        matched_at: { type: string, format: date-time, nullable: true }
-        matched_by: { type: integer, nullable: true, description: "User ID (u ručního párování)" }
+        matched_invoice_id: { type: [integer, "null"], format: int64, description: "Spárovaná VYDANÁ faktura" }
+        matched_purchase_invoice_id: { type: [integer, "null"], format: int64, description: "Spárovaná PŘIJATÁ faktura (z payment_matches; jen v detailu)" }
+        matched_varsymbol: { type: [string, "null"] }
+        matched_invoice_amount: { type: [number, "null"], format: float }
+        client_id: { type: [integer, "null"] }
+        matched_client_name: { type: [string, "null"] }
+        matched_at: { type: [string, "null"], format: date-time }
+        matched_by: { type: [integer, "null"], description: "User ID (u ručního párování)" }
 
     SupplierUpdate:
       type: object
@@ -6424,25 +6677,24 @@ components:
         a `signature_path` přes tento endpoint změnit NELZE (bezpečnost).
       properties:
         company_name: { type: string }
-        display_name: { type: string, nullable: true, description: "Obchodní/značkové jméno v hlavičce PDF a e-mailů (fallback = company_name)" }
+        display_name: { type: [string, "null"], description: "Obchodní/značkové jméno v hlavičce PDF a e-mailů (fallback = company_name)" }
         street: { type: string }
         city: { type: string }
         zip: { type: string }
         country_id: { type: integer }
-        ic: { type: string, nullable: true }
-        dic: { type: string, nullable: true }
+        ic: { type: [string, "null"] }
+        dic: { type: [string, "null"] }
         is_vat_payer: { type: boolean }
-        email: { type: string, format: email, nullable: true }
-        phone: { type: string, nullable: true }
-        web: { type: string, nullable: true }
-        tagline: { type: string, nullable: true, description: "Podtitulek v patičce PDF a e-mailů" }
+        email: { type: [string, "null"], format: email }
+        phone: { type: [string, "null"] }
+        web: { type: [string, "null"] }
+        tagline: { type: [string, "null"], description: "Podtitulek v patičce PDF a e-mailů" }
         default_currency_id: { type: integer }
         default_payment_due_days: { type: integer }
         default_payment_due_unit: { type: string, enum: [days, month] }
         default_prices_include_vat: { type: boolean }
         invoice_number_format:
-          type: string
-          nullable: true
+          type: [string, "null"]
           maxLength: 60
           example: "{YY}{MM}{CCC}"
           description: |
@@ -6450,16 +6702,18 @@ components:
             counter s paddingem dle počtu C (např. `{CCC}` → 001). Musí
             obsahovat counter placeholder. Prázdný string / null = fallback
             na globální cfg.
-        proforma_number_format: { type: string, nullable: true, maxLength: 60, example: "9{YY}{MM}{CCC}" }
-        credit_note_number_format: { type: string, nullable: true, maxLength: 60, example: "7{YY}{MM}{CCC}" }
-        purchase_invoice_number_format: { type: string, nullable: true, maxLength: 60, description: "Interní číslování přijatých faktur" }
+        proforma_number_format: { type: [string, "null"], maxLength: 60, example: "9{YY}{MM}{CCC}" }
+        credit_note_number_format: { type: [string, "null"], maxLength: 60, example: "7{YY}{MM}{CCC}" }
+        purchase_invoice_number_format: { type: [string, "null"], maxLength: 60, description: "Interní číslování přijatých faktur" }
         invoice_number_period:
           type: string
           enum: [year, month, none]
           description: "Reset counteru: ročně / měsíčně / nikdy (jedna průběžná řada). Společné pro všechny typy dokladů."
-        email_branding_enabled: { type: boolean, description: "Zapne logo + akcentní barvu v e-mailech a PDF" }
+        email_branding_enabled: { type: boolean, description: "Původní branding dodavatele používaný při vypnutých brandingových profilech" }
         email_accent_color: { type: string, example: "#3B2D83", description: "Hex #RRGGBB; akcentní barva e-mailů a PDF faktur" }
         pdf_logo_show_name: { type: boolean, description: "Zobrazit vedle loga v PDF i název dodavatele" }
+        branding_profiles_enabled: { type: boolean, description: "Zapíná volbu brandingových profilů; výchozí hodnota je false." }
+        default_branding_profile_id: { type: [integer, "null"], readOnly: true }
         auto_send_reminders: { type: boolean }
         reminder_days_after_due: { type: integer, minimum: 1, maximum: 365 }
 
@@ -6473,21 +6727,21 @@ components:
       properties:
         id: { type: integer }
         company_name: { type: string }
-        display_name: { type: string, nullable: true }
+        display_name: { type: [string, "null"] }
         street: { type: string }
         city: { type: string }
         zip: { type: string }
         country_id: { type: integer }
         country_iso: { type: string, description: "Odvozený ISO2 kód země" }
-        ic: { type: string, nullable: true }
-        dic: { type: string, nullable: true }
+        ic: { type: [string, "null"] }
+        dic: { type: [string, "null"] }
         is_vat_payer: { type: boolean }
         is_identified: { type: boolean, description: "Identifikovaná osoba (§ 6g–6l ZDPH, issue #94) — neplátce v tuzemsku s přeshraničními povinnostmi (RC faktury do EU, SHV, samovyměření bez odpočtu). Nelze kombinovat s is_vat_payer=true." }
-        commercial_register: { type: string, nullable: true, description: "Spisová značka u rejstříkového soudu (doplňuje ARES enricher)" }
-        email: { type: string, format: email, nullable: true }
-        phone: { type: string, nullable: true }
-        web: { type: string, nullable: true }
-        tagline: { type: string, nullable: true }
+        commercial_register: { type: [string, "null"], description: "Spisová značka u rejstříkového soudu (doplňuje ARES enricher)" }
+        email: { type: [string, "null"], format: email }
+        phone: { type: [string, "null"] }
+        web: { type: [string, "null"] }
+        tagline: { type: [string, "null"] }
         default_currency_id: { type: integer }
         default_currency: { type: string, description: "Odvozený kód výchozí měny" }
         default_payment_due_days: { type: integer }
@@ -6495,17 +6749,16 @@ components:
         default_hourly_rate: { type: number, format: float }
         default_prices_include_vat: { type: boolean, description: "Default pro nové doklady (migrace 0083)" }
         invoice_number_format:
-          type: string
-          nullable: true
+          type: [string, "null"]
           example: "{YY}{MM}{CCC}"
           description: "{YYYY}/{YY}, {MM}, {C..C} placeholders (viz SupplierUpdate). Per-supplier; null = globální cfg."
-        proforma_number_format: { type: string, nullable: true }
-        credit_note_number_format: { type: string, nullable: true }
-        purchase_invoice_number_format: { type: string, nullable: true }
+        proforma_number_format: { type: [string, "null"] }
+        credit_note_number_format: { type: [string, "null"] }
+        purchase_invoice_number_format: { type: [string, "null"] }
         invoice_number_period: { type: string, enum: [year, month, none], description: "Reset counteru číselných řad" }
-        taxpayer_type: { type: string, enum: [fo, po], nullable: true, description: "Fyzická / právnická osoba (EPO výkazy)" }
-        vat_period: { type: string, enum: [monthly, quarterly], nullable: true }
-        financial_office_code: { type: string, nullable: true, description: "Kód FÚ pro EPO (= CRPDPH cisloFu)" }
+        taxpayer_type: { type: [string, "null"], enum: [fo, po, null], description: "Fyzická / právnická osoba (EPO výkazy)" }
+        vat_period: { type: [string, "null"], enum: [monthly, quarterly, null] }
+        financial_office_code: { type: [string, "null"], description: "Kód FÚ pro EPO (= CRPDPH cisloFu)" }
         flat_tax_band: { type: string, enum: [none, band1, band2, band3], description: "Pásmo paušální daně" }
         email_branding_enabled: { type: boolean }
         email_accent_color: { type: string, example: "#3B2D83" }
@@ -6513,8 +6766,7 @@ components:
         auto_send_reminders: { type: boolean }
         reminder_days_after_due: { type: integer, minimum: 1, maximum: 365, default: 3, description: "Per-dodavatel práh: po kolika dnech po splatnosti poslat první automatickou upomínku (migrace 0089). CLI --days ho přebije." }
         self_copy:
-          type: object
-          nullable: true
+          type: [object, "null"]
           description: |
             Kopie odchozích e-mailů na e-mail dodavatele (migrace 0102).
             Klíče = typy zpráv, hodnoty off|cc|bcc. Chybějící klíč nebo null
@@ -6545,20 +6797,40 @@ components:
         paid_on: { type: string, format: date }
         amount: { type: number, format: float, description: "Částka v měně faktury (> 0)" }
         currency: { type: string, example: CZK, description: "Denormalizovaný kód měny faktury v okamžiku platby" }
-        variable_symbol: { type: string, nullable: true }
-        bank_reference: { type: string, nullable: true }
-        note: { type: string, nullable: true }
+        variable_symbol: { type: [string, "null"] }
+        bank_reference: { type: [string, "null"] }
+        note: { type: [string, "null"] }
         source:
           type: string
           enum: [manual, mark_paid, bank, legacy]
           description: "manual = ruční záznam, mark_paid = zkratka „označit zaplaceno“, bank = bankovní párování (GPC i e-mailové avízo), legacy = backfill z dob před evidencí plateb"
-        bank_transaction_id: { type: integer, format: int64, nullable: true, description: "Vazba na bankovní transakci (taková platba se maže přes unmatch ve výpisu)" }
-        bank_statement_id: { type: integer, format: int64, nullable: true }
-        tax_document_invoice_id: { type: integer, format: int64, nullable: true, description: "Daňový doklad k přijaté platbě vystavený k této platbě (jen u záloh)" }
-        tax_document_varsymbol: { type: string, nullable: true }
-        tax_document_status: { type: string, nullable: true, enum: [draft, issued, sent, reminded, paid, cancelled] }
-        created_by: { type: integer, nullable: true }
+        bank_transaction_id: { type: [integer, "null"], format: int64, description: "Vazba na bankovní transakci (taková platba se maže přes unmatch ve výpisu)" }
+        bank_statement_id: { type: [integer, "null"], format: int64 }
+        tax_document_invoice_id: { type: [integer, "null"], format: int64, description: "Daňový doklad k přijaté platbě vystavený k této platbě (jen u záloh)" }
+        tax_document_varsymbol: { type: [string, "null"] }
+        tax_document_status: { type: [string, "null"], enum: [draft, issued, sent, reminded, paid, cancelled, null] }
+        created_by: { type: [integer, "null"] }
         created_at: { type: string, format: date-time }
+
+    InvoiceRelatedBankTransaction:
+      type: object
+      description: "Bankovní operace přímo spárovaná s fakturou přes matched_invoice_id. Jde o dohledatelnou vazbu; bez odpovídajícího InvoicePayment se nezapočítává do paid_total."
+      properties:
+        id: { type: integer, format: int64 }
+        statement_id: { type: integer, format: int64 }
+        statement_source: { type: string, enum: [gpc, pdf, email_notice, idoklad] }
+        posted_at: { type: string, format: date }
+        amount: { type: number, format: float }
+        currency: { type: [string, "null"] }
+        variable_symbol: { type: [string, "null"] }
+        constant_symbol: { type: [string, "null"] }
+        specific_symbol: { type: [string, "null"] }
+        counterparty_account: { type: [string, "null"] }
+        counterparty_bank: { type: [string, "null"] }
+        counterparty_name: { type: [string, "null"] }
+        description: { type: [string, "null"] }
+        bank_ref: { type: [string, "null"] }
+        match_status: { type: string, enum: [unmatched, auto_exact, auto_partial, manual, ignored] }
 
     InvoiceItem:
       type: object
@@ -6575,10 +6847,10 @@ components:
           format: float
           example: 21
           description: "Snapshot procentní hodnoty DPH v okamžiku přidání položky (drží se i po případné změně sazby v číselníku)"
-        vat_code: { type: string, nullable: true, example: "STD", description: "Kód sazby ze snapshot-u (STD / RED1 / RED2 / ZERO / FREE)" }
-        vat_label_cs: { type: string, nullable: true, description: "Lokalizovaný název sazby (CS)" }
-        vat_label_en: { type: string, nullable: true, description: "Lokalizovaný název sazby (EN)" }
-        vat_classification_code: { type: string, nullable: true, example: "3", description: "Kód klasifikace plnění pro DPH přiznání / Kontrolní hlášení (default podle sazby + reverse charge + země klienta). U neplátce DPH bez významu." }
+        vat_code: { type: [string, "null"], example: "STD", description: "Kód sazby ze snapshot-u (STD / RED1 / RED2 / ZERO / FREE)" }
+        vat_label_cs: { type: [string, "null"], description: "Lokalizovaný název sazby (CS)" }
+        vat_label_en: { type: [string, "null"], description: "Lokalizovaný název sazby (EN)" }
+        vat_classification_code: { type: [string, "null"], example: "3", description: "Kód klasifikace plnění pro DPH přiznání / Kontrolní hlášení (default podle sazby + reverse charge + země klienta). U neplátce DPH bez významu." }
         total_without_vat: { type: number, format: float }
         total_vat: { type: number, format: float }
         total_with_vat: { type: number, format: float }
@@ -6588,7 +6860,16 @@ components:
           default: standard
           description: "`discount` = systémově vygenerovaný záporný řádek „Sleva X %\" z `discount_percent` faktury (po sazbách DPH). Needituj ho ručně."
         order_index: { type: integer }
-        linked_work_report_id: { type: integer, nullable: true }
+        linked_work_report_id: { type: [integer, "null"] }
+        oss_applicable: { type: boolean }
+        oss_consumer_country: { type: [string, "null"], minLength: 2, maxLength: 2 }
+        oss_rate_type: { type: [string, "null"], enum: [standard, reduced, second_reduced, parking, zero, null] }
+        oss_supply_type: { type: [string, "null"], enum: [goods, services, null] }
+        oss_exchange_rate: { type: [number, "null"] }
+        oss_exchange_rate_date: { type: [string, "null"], format: date }
+        oss_taxable_amount_return: { type: [number, "null"], description: Základ daně přepočtený do EUR. }
+        oss_vat_amount_return: { type: [number, "null"], description: DPH přepočtená do EUR. }
+        oss_original_period: { type: [string, "null"], pattern: '^[0-9]{4}Q[1-4]$', description: Původní období opravy; prázdné znamená běžné plnění VetaR. }
 
     InvoiceItemInput:
       type: object
@@ -6600,7 +6881,16 @@ components:
         unit_price_without_vat: { type: number, format: float, description: "Jednotková cena BEZ DPH. Může být záporná pro slevový řádek, ale ne současně se záporným množstvím." }
         vat_rate_id: { type: integer, description: "FK do /codebooks/vat-rates (kontextově k supplierovi)" }
         order_index: { type: integer, description: "Pořadí v rámci faktury. Default = pozice v poli." }
-        vat_classification_code: { type: string, nullable: true, description: "Volitelný kód klasifikace plnění (DPH přiznání / KH). Když nevyplněno, server dopočítá default podle sazby + reverse charge + země klienta." }
+        vat_classification_code: { type: [string, "null"], description: "Volitelný kód klasifikace plnění (DPH přiznání / KH). Když nevyplněno, server dopočítá default podle sazby + reverse charge + země klienta." }
+        oss_applicable: { type: boolean, default: false }
+        oss_consumer_country: { type: [string, "null"], minLength: 2, maxLength: 2 }
+        oss_rate_type: { type: [string, "null"], enum: [standard, reduced, second_reduced, parking, zero, null] }
+        oss_supply_type: { type: [string, "null"], enum: [goods, services, null] }
+        oss_exchange_rate: { type: [number, "null"] }
+        oss_exchange_rate_date: { type: [string, "null"], format: date }
+        oss_taxable_amount_return: { type: [number, "null"] }
+        oss_vat_amount_return: { type: [number, "null"] }
+        oss_original_period: { type: [string, "null"], pattern: '^[0-9]{4}Q[1-4]$', description: Původní čtvrtletí pro opravu VetaO; musí být od Q3 2021. }
 
     RecurringTemplate:
       type: object
@@ -6610,23 +6900,22 @@ components:
         supplier_id: { type: integer }
         client_id: { type: integer }
         client_company_name: { type: string }
-        project_id: { type: integer, nullable: true }
-        project_name: { type: string, nullable: true }
+        project_id: { type: [integer, "null"] }
+        project_name: { type: [string, "null"] }
         name: { type: string, description: "Display name pro admin (např. \"Hosting Acme s.r.o.\")" }
         frequency:
           type: string
           enum: [monthly, quarterly, semi_annually, annually]
         day_of_month:
-          type: integer
-          nullable: true
+          type: [integer, "null"]
           description: "1–28; pokud null a end_of_month=false, odvodí se z anchor_date"
         end_of_month:
           type: boolean
           description: "true = poslední den měsíce (28/29/30/31 dynamicky); přebíjí day_of_month"
         anchor_date: { type: string, format: date }
-        end_date:    { type: string, format: date, nullable: true }
+        end_date:    { type: [string, "null"], format: date }
         next_run_date: { type: string, format: date }
-        last_run_date: { type: string, format: date, nullable: true }
+        last_run_date: { type: [string, "null"], format: date }
         invoice_type:
           type: string
           enum: [invoice, proforma]
@@ -6640,18 +6929,17 @@ components:
         payment_due_days: { type: integer }
         discount_percent: { type: number, format: float, description: "Procentuální sleva (0–100) zděděná na každou vygenerovanou fakturu." }
         revenue_category_id:
-          type: integer
-          nullable: true
+          type: [integer, "null"]
           description: "Pevná kategorie tržby pro generované faktury (#119) — přebíjí fallback výchozí kategorie zakázky > zákazníka. NULL = fallback. Na fakturu se ukládá jako snapshot při generování."
-        revenue_category_label: { type: string, nullable: true, description: "Label kategorie (jen detail šablony)." }
-        revenue_category_code: { type: string, nullable: true, description: "Kód kategorie (jen detail šablony)." }
+        revenue_category_label: { type: [string, "null"], description: "Label kategorie (jen detail šablony)." }
+        revenue_category_code: { type: [string, "null"], description: "Kód kategorie (jen detail šablony)." }
         draft_open_mode:
           type: string
           enum: [at_issue, period_start]
           description: "at_issue = koncept vznikne až v den vystavení; period_start = koncept se otevře na začátku období (průběžný výkaz víceprací) a vystaví se na konci."
         reminder_days_before: { type: integer, description: "0–14; připomenutí konceptu N dní před vystavením (0 = vypnuto; jen pro period_start)." }
-        note_above_items: { type: string, nullable: true }
-        note_below_items: { type: string, nullable: true }
+        note_above_items: { type: [string, "null"] }
+        note_below_items: { type: [string, "null"] }
         increment_month_in_descriptions:
           type: boolean
           description: "Posun M/YYYY v popiscích položek (např. „Hosting 3/2026\" → „Hosting 4/2026\"). Pro frequency != monthly se posouvá o odpovídající počet měsíců."
@@ -6665,8 +6953,8 @@ components:
           type: string
           enum: [active, paused, expired]
         invoices_generated_count: { type: integer }
-        last_error: { type: string, nullable: true, description: "Poslední chyba generování (cron) — UI ji ukáže jako banner u šablony; vyčistí se po úspěšném ručním běhu." }
-        last_error_at: { type: string, format: date-time, nullable: true }
+        last_error: { type: [string, "null"], description: "Poslední chyba generování (cron) — UI ji ukáže jako banner u šablony; vyčistí se po úspěšném ručním běhu." }
+        last_error_at: { type: [string, "null"], format: date-time }
         created_at: { type: string }
         updated_at: { type: string }
         items:
@@ -6688,19 +6976,18 @@ components:
       required: [client_id, name, frequency, anchor_date, currency_id, items]
       properties:
         client_id: { type: integer }
-        project_id: { type: integer, nullable: true }
+        project_id: { type: [integer, "null"] }
         name: { type: string, maxLength: 200 }
         frequency:
           type: string
           enum: [monthly, quarterly, semi_annually, annually]
         day_of_month:
-          type: integer
+          type: [integer, "null"]
           minimum: 1
           maximum: 28
-          nullable: true
         end_of_month: { type: boolean, default: false }
         anchor_date: { type: string, format: date }
-        end_date:    { type: string, format: date, nullable: true }
+        end_date:    { type: [string, "null"], format: date }
         invoice_type:
           type: string
           enum: [invoice, proforma]
@@ -6721,8 +7008,7 @@ components:
           default: 0
           description: "Procentuální sleva z celé faktury (0–100); zdědí ji každá vygenerovaná faktura (materializuje se jako záporná položka „Sleva X %\")."
         revenue_category_id:
-          type: integer
-          nullable: true
+          type: [integer, "null"]
           description: "Pevná kategorie tržby pro generované faktury (#119). Musí existovat a patřit dodavateli šablony. NULL/vynecháno = fallback výchozí kategorie zakázky > zákazníka při generování."
         draft_open_mode:
           type: string
@@ -6740,8 +7026,8 @@ components:
           maximum: 14
           default: 0
           description: "Připomenutí konceptu N dní před vystavením (jen draft_open_mode=period_start; 0 = vypnuto)."
-        note_above_items: { type: string, nullable: true }
-        note_below_items: { type: string, nullable: true }
+        note_above_items: { type: [string, "null"] }
+        note_below_items: { type: [string, "null"] }
         increment_month_in_descriptions: { type: boolean, default: true }
         auto_issue: { type: boolean, default: true }
         auto_send_email: { type: boolean, default: true }
@@ -6767,11 +7053,11 @@ components:
         id: { type: integer }
         supplier_id: { type: integer }
         vendor_id: { type: integer }
-        varsymbol: { type: string, nullable: true, description: "Naše interní číslo PF-YYYYMM-NNNN" }
+        varsymbol: { type: [string, "null"], description: "Naše interní číslo PF-YYYYMM-NNNN" }
         vendor_invoice_number: { type: string }
         document_kind: { type: string, enum: [invoice, receipt, credit_note, advance] }
         issue_date: { type: string, format: date }
-        tax_date: { type: string, format: date, nullable: true, description: "DUZP" }
+        tax_date: { type: [string, "null"], format: date, description: "DUZP" }
         due_date: { type: string, format: date }
         received_at: { type: string, format: date }
         currency_id: { type: integer }
@@ -6781,19 +7067,19 @@ components:
         total_with_vat: { type: number }
         advance_paid_amount: { type: number }
         amount_to_pay: { type: number, description: "Generated column = total_with_vat - advance_paid_amount" }
-        exchange_rate: { type: number, nullable: true }
-        exchange_rate_date: { type: string, format: date, nullable: true }
+        exchange_rate: { type: [number, "null"] }
+        exchange_rate_date: { type: [string, "null"], format: date }
         status: { type: string, enum: [draft, received, booked, paid, cancelled] }
-        booked_at: { type: string, format: date-time, nullable: true }
-        paid_at: { type: string, format: date, nullable: true }
-        cancelled_at: { type: string, format: date-time, nullable: true }
+        booked_at: { type: [string, "null"], format: date-time }
+        paid_at: { type: [string, "null"], format: date }
+        cancelled_at: { type: [string, "null"], format: date-time }
         vat_deduction: { type: string, enum: [full, none, proportional] }
         vat_deduction_percent: { type: number, format: float }
         tax_deductible: { type: boolean }
-        extraction_warning: { type: string, nullable: true }
+        extraction_warning: { type: [string, "null"] }
         currency_symbol: { type: string }
         vendor_company_name: { type: string }
-        vendor_ic: { type: string, nullable: true }
+        vendor_ic: { type: [string, "null"] }
         month_bucket: { type: string, example: "2026-05" }
 
     PurchaseInvoiceItem:
@@ -6811,12 +7097,11 @@ components:
         total_vat: { type: number }
         total_with_vat: { type: number }
         order_index: { type: integer }
-        vat_code: { type: string, nullable: true, description: "Kód sazby ze snapshot-u (STD / RED1 / …)" }
-        vat_label_cs: { type: string, nullable: true }
-        vat_label_en: { type: string, nullable: true }
+        vat_code: { type: [string, "null"], description: "Kód sazby ze snapshot-u (STD / RED1 / …)" }
+        vat_label_cs: { type: [string, "null"] }
+        vat_label_en: { type: [string, "null"] }
         vat_classification_code:
-          type: string
-          nullable: true
+          type: [string, "null"]
           description: "MFČR kód pro DPH/KH (připraveno pro fázi 6)"
         is_fixed_asset:
           type: boolean
@@ -6837,7 +7122,7 @@ components:
         unit_price_without_vat: { type: number }
         vat_rate_id: { type: integer }
         order_index: { type: integer }
-        vat_classification_code: { type: string, nullable: true }
+        vat_classification_code: { type: [string, "null"] }
         is_fixed_asset: { type: boolean, default: false }
 
     PurchaseInvoice:
@@ -6846,24 +7131,24 @@ components:
         id: { type: integer }
         supplier_id: { type: integer }
         vendor_id: { type: integer }
-        varsymbol: { type: string, nullable: true }
+        varsymbol: { type: [string, "null"] }
         vendor_invoice_number: { type: string }
         document_kind: { type: string, enum: [invoice, receipt, credit_note, advance] }
-        advance_purchase_invoice_id: { type: integer, nullable: true, description: "FK na zálohovou fakturu, kterou tento doklad vyúčtovává (párování zálohy)" }
-        advance_link_suggested_id: { type: integer, nullable: true, description: "AI/auto návrh na propojení zálohy (čeká na potvrzení)" }
+        advance_purchase_invoice_id: { type: [integer, "null"], description: "FK na zálohovou fakturu, kterou tento doklad vyúčtovává (párování zálohy)" }
+        advance_link_suggested_id: { type: [integer, "null"], description: "AI/auto návrh na propojení zálohy (čeká na potvrzení)" }
         issue_date: { type: string, format: date }
-        tax_date: { type: string, format: date, nullable: true }
+        tax_date: { type: [string, "null"], format: date }
         due_date: { type: string, format: date }
         received_at: { type: string, format: date }
         prices_include_vat: { type: boolean, description: "Ceny položek zadané včetně DPH (migrace 0083)" }
-        expense_category_id: { type: integer, nullable: true, description: "FK do /expense-categories — kategorie nákladu pro CRM/dashboard" }
-        expense_category_label: { type: string, nullable: true }
-        expense_category_code: { type: string, nullable: true }
+        expense_category_id: { type: [integer, "null"], description: "FK do /expense-categories — kategorie nákladu pro CRM/dashboard" }
+        expense_category_label: { type: [string, "null"] }
+        expense_category_code: { type: [string, "null"] }
         currency_id: { type: integer }
         currency: { type: string }
         currency_symbol: { type: string }
-        exchange_rate: { type: number, nullable: true }
-        exchange_rate_date: { type: string, format: date, nullable: true }
+        exchange_rate: { type: [number, "null"] }
+        exchange_rate_date: { type: [string, "null"], format: date }
         exchange_rate_source: { type: string, enum: [cnb, manual, idoklad, fakturoid] }
         reverse_charge: { type: boolean }
         vat_deduction:
@@ -6897,48 +7182,45 @@ components:
             nebo přes ř. 43 RC mirror), hodnota se navíc uvede na ř. 47 jako
             doplňující údaj (`nar_maj`).
         language: { type: string, enum: [cs, en] }
-        note_above_items: { type: string, nullable: true }
-        note_below_items: { type: string, nullable: true }
+        note_above_items: { type: [string, "null"] }
+        note_below_items: { type: [string, "null"] }
         vendor_snapshot:
           type: object
           description: Immutable JSON snapshot vendor row at time of receipt
-        own_snapshot: { type: object, nullable: true }
+        own_snapshot: { type: [object, "null"] }
         total_without_vat: { type: number }
         total_vat: { type: number }
         total_with_vat: { type: number }
         rounding: { type: number }
         advance_paid_amount: { type: number }
         amount_to_pay: { type: number }
-        payment_currency_id: { type: integer, nullable: true }
-        payment_exchange_rate: { type: number, nullable: true }
-        paid_amount_payment_ccy: { type: number, nullable: true }
-        paid_amount_invoice_ccy: { type: number, nullable: true }
+        payment_currency_id: { type: [integer, "null"] }
+        payment_exchange_rate: { type: [number, "null"] }
+        paid_amount_payment_ccy: { type: [number, "null"] }
+        paid_amount_invoice_ccy: { type: [number, "null"] }
         exchange_diff_base:
-          type: number
-          nullable: true
+          type: [number, "null"]
           description: "FX gain/loss v base ccy (CZK)"
         status: { type: string, enum: [draft, received, booked, paid, cancelled] }
-        booked_at: { type: string, format: date-time, nullable: true }
-        paid_at: { type: string, format: date, nullable: true }
-        cancelled_at: { type: string, format: date-time, nullable: true }
+        booked_at: { type: [string, "null"], format: date-time }
+        paid_at: { type: [string, "null"], format: date }
+        cancelled_at: { type: [string, "null"], format: date-time }
         pdf_path:
-          type: string
-          nullable: true
+          type: [string, "null"]
           description: "Relative path within archive_storage"
-        pdf_hash: { type: string, nullable: true, description: "SHA-256 hex" }
-        pdf_size_bytes: { type: integer, nullable: true }
-        pdf_original_name: { type: string, nullable: true }
-        pdf_uploaded_at: { type: string, format: date-time, nullable: true }
-        source_path: { type: string, nullable: true, description: "Relative path to machine-readable source artifact within archive_storage (sources/ subtree)" }
-        source_hash: { type: string, nullable: true, description: "SHA-256 hex of source artifact" }
-        source_size_bytes: { type: integer, nullable: true }
-        source_original_name: { type: string, nullable: true }
-        source_format: { type: string, nullable: true, enum: [isdoc, isdocx, pdf, pohoda_xml, idoklad_json, fakturoid_json], description: "Format of the archived authoritative source document" }
-        source_uploaded_at: { type: string, format: date-time, nullable: true }
-        vat_classification_code: { type: string, nullable: true }
+        pdf_hash: { type: [string, "null"], description: "SHA-256 hex" }
+        pdf_size_bytes: { type: [integer, "null"] }
+        pdf_original_name: { type: [string, "null"] }
+        pdf_uploaded_at: { type: [string, "null"], format: date-time }
+        source_path: { type: [string, "null"], description: "Relative path to machine-readable source artifact within archive_storage (sources/ subtree)" }
+        source_hash: { type: [string, "null"], description: "SHA-256 hex of source artifact" }
+        source_size_bytes: { type: [integer, "null"] }
+        source_original_name: { type: [string, "null"] }
+        source_format: { type: [string, "null"], enum: [isdoc, isdocx, pdf, pohoda_xml, idoklad_json, fakturoid_json, null], description: "Format of the archived authoritative source document" }
+        source_uploaded_at: { type: [string, "null"], format: date-time }
+        vat_classification_code: { type: [string, "null"] }
         vat_overrides:
-          type: array
-          nullable: true
+          type: [array, "null"]
           description: "Per-sazba override rekapitulace DPH (§73; migrace 0086). Zapéká se do řádkových totálů."
           items:
             type: object
@@ -6946,22 +7228,21 @@ components:
               rate: { type: number }
               base: { type: number }
               vat:  { type: number }
-        extraction_warning: { type: string, nullable: true, description: "Varování z AI/automatické extrakce dokladu (rozdíl součtů apod.)" }
-        idoklad_id: { type: integer, nullable: true, description: "ID v iDoklad (jen u importovaných)" }
-        fakturoid_id: { type: integer, nullable: true, description: "ID ve Fakturoid (jen u importovaných)" }
+        extraction_warning: { type: [string, "null"], description: "Varování z AI/automatické extrakce dokladu (rozdíl součtů apod.)" }
+        idoklad_id: { type: [integer, "null"], description: "ID v iDoklad (jen u importovaných)" }
+        fakturoid_id: { type: [integer, "null"], description: "ID ve Fakturoid (jen u importovaných)" }
         created_by: { type: integer }
         created_at: { type: string, format: date-time }
         updated_at: { type: string, format: date-time }
         vendor_company_name: { type: string }
-        vendor_ic: { type: string, nullable: true }
-        vendor_dic: { type: string, nullable: true }
-        vendor_main_email: { type: string, nullable: true }
+        vendor_ic: { type: [string, "null"] }
+        vendor_dic: { type: [string, "null"] }
+        vendor_main_email: { type: [string, "null"] }
         linked_advance:
-          type: object
-          nullable: true
+          type: [object, "null"]
           description: "Brief zálohy, kterou tento doklad vyúčtovává ({ id, varsymbol, document_kind, status, total_with_vat, currency })"
-        advance_link_suggestion: { type: object, nullable: true, description: "Brief AI-navržené zálohy k propojení" }
-        settled_by: { type: object, nullable: true, description: "Jen u zálohy — brief finální faktury, která ji vyúčtovává" }
+        advance_link_suggestion: { type: [object, "null"], description: "Brief AI-navržené zálohy k propojení" }
+        settled_by: { type: [object, "null"], description: "Jen u zálohy — brief finální faktury, která ji vyúčtovává" }
         has_advance_candidates: { type: boolean }
         has_settlement_candidates: { type: boolean }
         items:
@@ -6992,22 +7273,21 @@ components:
       properties:
         vendor_id: { type: integer }
         vendor_invoice_number: { type: string, maxLength: 50 }
-        varsymbol: { type: string, nullable: true, maxLength: 20 }
+        varsymbol: { type: [string, "null"], maxLength: 20 }
         document_kind: { type: string, enum: [invoice, receipt, credit_note, advance], default: invoice }
         issue_date: { type: string, format: date }
-        tax_date: { type: string, format: date, nullable: true }
+        tax_date: { type: [string, "null"], format: date }
         due_date: { type: string, format: date }
         received_at: { type: string, format: date }
         currency_id: { type: integer }
-        exchange_rate: { type: number, nullable: true }
-        exchange_rate_date: { type: string, format: date, nullable: true }
+        exchange_rate: { type: [number, "null"] }
+        exchange_rate_date: { type: [string, "null"], format: date }
         exchange_rate_source: { type: string, enum: [cnb, manual, idoklad, fakturoid], default: cnb }
         reverse_charge: { type: boolean, default: false }
         prices_include_vat: { type: boolean, default: false, description: "Ceny položek zadané včetně DPH (DPH shora koeficientem)." }
-        expense_category_id: { type: integer, nullable: true, description: "Kategorie nákladu. Když chybí, na create se odvodí z default kategorie dodavatele." }
+        expense_category_id: { type: [integer, "null"], description: "Kategorie nákladu. Když chybí, na create se odvodí z default kategorie dodavatele." }
         vat_overrides:
-          type: array
-          nullable: true
+          type: [array, "null"]
           description: "Per-sazba override rekapitulace DPH (§73). Zapisuje se jen když je klíč přítomen; zapéká se do řádkových totálů."
           items:
             type: object
@@ -7024,15 +7304,15 @@ components:
           default: false
           description: "Doklad za dlouhodobý majetek — propíše se do ř. 47 DPHDP3 jako doplňující údaj."
         language: { type: string, enum: [cs, en], default: cs }
-        note_above_items: { type: string, nullable: true }
-        note_below_items: { type: string, nullable: true }
+        note_above_items: { type: [string, "null"] }
+        note_below_items: { type: [string, "null"] }
         advance_paid_amount: { type: number, default: 0 }
-        payment_currency_id: { type: integer, nullable: true }
-        payment_exchange_rate: { type: number, nullable: true }
-        paid_amount_payment_ccy: { type: number, nullable: true }
-        paid_amount_invoice_ccy: { type: number, nullable: true }
-        exchange_diff_base: { type: number, nullable: true }
-        vat_classification_code: { type: string, nullable: true }
+        payment_currency_id: { type: [integer, "null"] }
+        payment_exchange_rate: { type: [number, "null"] }
+        paid_amount_payment_ccy: { type: [number, "null"] }
+        paid_amount_invoice_ccy: { type: [number, "null"] }
+        exchange_diff_base: { type: [number, "null"] }
+        vat_classification_code: { type: [string, "null"] }
         items:
           type: array
           items: { $ref: '#/components/schemas/PurchaseInvoiceItemPayload' }
@@ -7054,64 +7334,64 @@ components:
               status:
                 type: string
                 enum: [created, skipped, failed, rejected, mapper_pending, config_missing, inbox_missing, limit_reached]
-              reason: { type: string, nullable: true }
-              purchase_invoice_id: { type: integer, nullable: true }
-              isdoc_invoice_count: { type: integer, nullable: true }
-              supplier_ic: { type: string, nullable: true }
+              reason: { type: [string, "null"] }
+              purchase_invoice_id: { type: [integer, "null"] }
+              isdoc_invoice_count: { type: [integer, "null"] }
+              supplier_ic: { type: [string, "null"] }
 
     Car:
       type: object
       properties:
         id: { type: integer, format: int64 }
         registration: { type: string }
-        name: { type: string, nullable: true }
-        brand: { type: string, nullable: true }
-        model: { type: string, nullable: true }
-        vin: { type: string, nullable: true }
-        fuel_type: { type: string, nullable: true, enum: [diesel, petrol, lpg, cng, electric, hybrid, other] }
-        odometer_start: { type: integer, nullable: true }
-        odometer_start_date: { type: string, format: date, nullable: true }
+        name: { type: [string, "null"] }
+        brand: { type: [string, "null"] }
+        model: { type: [string, "null"] }
+        vin: { type: [string, "null"] }
+        fuel_type: { type: [string, "null"], enum: [diesel, petrol, lpg, cng, electric, hybrid, other, null] }
+        odometer_start: { type: [integer, "null"] }
+        odometer_start_date: { type: [string, "null"], format: date }
         is_default: { type: boolean }
         is_archived: { type: boolean }
-        note: { type: string, nullable: true }
-        last_odometer: { type: integer, nullable: true, description: Poslední známý stav tachometru (z jízd) }
-        trips_count: { type: integer, nullable: true }
-        fuelings_count: { type: integer, nullable: true }
+        note: { type: [string, "null"] }
+        last_odometer: { type: [integer, "null"], description: Poslední známý stav tachometru (z jízd) }
+        trips_count: { type: [integer, "null"] }
+        fuelings_count: { type: [integer, "null"] }
         created_at: { type: string, format: date-time }
     CarInput:
       type: object
       required: [registration]
       properties:
         registration: { type: string, maxLength: 20 }
-        name: { type: string, nullable: true }
-        brand: { type: string, nullable: true }
-        model: { type: string, nullable: true }
-        vin: { type: string, nullable: true }
-        fuel_type: { type: string, nullable: true, enum: [diesel, petrol, lpg, cng, electric, hybrid, other] }
-        odometer_start: { type: integer, nullable: true }
-        odometer_start_date: { type: string, format: date, nullable: true }
+        name: { type: [string, "null"] }
+        brand: { type: [string, "null"] }
+        model: { type: [string, "null"] }
+        vin: { type: [string, "null"] }
+        fuel_type: { type: [string, "null"], enum: [diesel, petrol, lpg, cng, electric, hybrid, other, null] }
+        odometer_start: { type: [integer, "null"] }
+        odometer_start_date: { type: [string, "null"], format: date }
         is_default: { type: boolean }
         is_archived: { type: boolean }
-        note: { type: string, nullable: true }
+        note: { type: [string, "null"] }
     Trip:
       type: object
       properties:
         id: { type: integer, format: int64 }
         car_id: { type: integer }
-        car_registration: { type: string, nullable: true }
+        car_registration: { type: [string, "null"] }
         trip_date: { type: string, format: date }
-        time_start: { type: string, nullable: true }
-        time_end: { type: string, nullable: true }
-        odometer_start: { type: integer, nullable: true }
-        odometer_end: { type: integer, nullable: true }
+        time_start: { type: [string, "null"] }
+        time_end: { type: [string, "null"] }
+        odometer_start: { type: [integer, "null"] }
+        odometer_end: { type: [integer, "null"] }
         distance_km: { type: number }
-        category_id: { type: integer, nullable: true }
-        category_label: { type: string, nullable: true }
-        category_is_private: { type: boolean, nullable: true }
-        purpose: { type: string, nullable: true }
-        origin: { type: string, nullable: true }
-        destination: { type: string, nullable: true }
-        note: { type: string, nullable: true }
+        category_id: { type: [integer, "null"] }
+        category_label: { type: [string, "null"] }
+        category_is_private: { type: [boolean, "null"] }
+        purpose: { type: [string, "null"] }
+        origin: { type: [string, "null"] }
+        destination: { type: [string, "null"] }
+        note: { type: [string, "null"] }
         created_at: { type: string, format: date-time }
     TripInput:
       type: object
@@ -7119,59 +7399,59 @@ components:
       properties:
         car_id: { type: integer }
         trip_date: { type: string, format: date }
-        time_start: { type: string, nullable: true }
-        time_end: { type: string, nullable: true }
-        odometer_start: { type: integer, nullable: true }
-        odometer_end: { type: integer, nullable: true }
-        distance_km: { type: number, nullable: true, description: "Prázdné = dopočítá se z tachometru (konec − začátek)" }
-        category_id: { type: integer, nullable: true }
-        purpose: { type: string, nullable: true }
-        origin: { type: string, nullable: true }
-        destination: { type: string, nullable: true }
-        note: { type: string, nullable: true }
+        time_start: { type: [string, "null"] }
+        time_end: { type: [string, "null"] }
+        odometer_start: { type: [integer, "null"] }
+        odometer_end: { type: [integer, "null"] }
+        distance_km: { type: [number, "null"], description: "Prázdné = dopočítá se z tachometru (konec − začátek)" }
+        category_id: { type: [integer, "null"] }
+        purpose: { type: [string, "null"] }
+        origin: { type: [string, "null"] }
+        destination: { type: [string, "null"] }
+        note: { type: [string, "null"] }
     Fueling:
       type: object
       properties:
         id: { type: integer, format: int64 }
-        car_id: { type: integer, nullable: true }
-        car_registration: { type: string, nullable: true }
+        car_id: { type: [integer, "null"] }
+        car_registration: { type: [string, "null"] }
         fueled_date: { type: string, format: date }
-        fueled_time: { type: string, nullable: true }
-        fuel_type: { type: string, nullable: true }
-        quantity: { type: number, nullable: true }
+        fueled_time: { type: [string, "null"] }
+        fuel_type: { type: [string, "null"] }
+        quantity: { type: [number, "null"] }
         unit: { type: string }
-        unit_price: { type: number, nullable: true }
-        amount_without_vat: { type: number, nullable: true }
-        amount_vat: { type: number, nullable: true }
+        unit_price: { type: [number, "null"] }
+        amount_without_vat: { type: [number, "null"] }
+        amount_vat: { type: [number, "null"] }
         amount_with_vat: { type: number }
         currency: { type: string }
-        odometer: { type: integer, nullable: true }
-        station: { type: string, nullable: true }
-        vendor_id: { type: integer, nullable: true }
-        vendor_name: { type: string, nullable: true }
+        odometer: { type: [integer, "null"] }
+        station: { type: [string, "null"] }
+        vendor_id: { type: [integer, "null"] }
+        vendor_name: { type: [string, "null"] }
         source: { type: string, enum: [manual, invoice, axigon, axigon_ai, import] }
-        source_purchase_invoice_id: { type: integer, nullable: true }
-        source_invoice_number: { type: string, nullable: true }
-        receipt_number: { type: string, nullable: true }
-        note: { type: string, nullable: true }
+        source_purchase_invoice_id: { type: [integer, "null"] }
+        source_invoice_number: { type: [string, "null"] }
+        receipt_number: { type: [string, "null"] }
+        note: { type: [string, "null"] }
         created_at: { type: string, format: date-time }
     FuelingInput:
       type: object
       required: [fueled_date, amount_with_vat]
       properties:
-        car_id: { type: integer, nullable: true }
+        car_id: { type: [integer, "null"] }
         fueled_date: { type: string, format: date }
-        fueled_time: { type: string, nullable: true }
-        fuel_type: { type: string, nullable: true }
-        quantity: { type: number, nullable: true }
+        fueled_time: { type: [string, "null"] }
+        fuel_type: { type: [string, "null"] }
+        quantity: { type: [number, "null"] }
         unit: { type: string }
-        unit_price: { type: number, nullable: true }
+        unit_price: { type: [number, "null"] }
         amount_with_vat: { type: number }
         currency: { type: string }
-        odometer: { type: integer, nullable: true }
-        station: { type: string, nullable: true }
-        vendor_id: { type: integer, nullable: true }
-        note: { type: string, nullable: true }
+        odometer: { type: [integer, "null"] }
+        station: { type: [string, "null"] }
+        vendor_id: { type: [integer, "null"] }
+        note: { type: [string, "null"] }
     TripCategory:
       type: object
       properties:
@@ -7181,7 +7461,7 @@ components:
         is_private: { type: boolean }
         display_order: { type: integer }
         is_archived: { type: boolean }
-        trips_count: { type: integer, nullable: true }
+        trips_count: { type: [integer, "null"] }
     LogbookSummary:
       type: object
       properties:
@@ -7203,7 +7483,7 @@ components:
       properties:
         car_id: { type: integer }
         registration: { type: string }
-        name: { type: string, nullable: true }
+        name: { type: [string, "null"] }
         trips_count: { type: integer }
         km: { type: number }
         business_km: { type: number }
@@ -7211,8 +7491,8 @@ components:
         uncategorized_km: { type: number }
         private_ratio: { type: number }
         business_ratio: { type: number }
-        odometer_start: { type: integer, nullable: true }
-        odometer_end: { type: integer, nullable: true }
+        odometer_start: { type: [integer, "null"] }
+        odometer_end: { type: [integer, "null"] }
         fuel_count: { type: integer }
         liters: { type: number }
         liters_count: { type: integer }
@@ -7221,8 +7501,8 @@ components:
         kwh_count: { type: integer }
         kwh_incomplete: { type: boolean }
         fuel_cost: { type: number }
-        avg_consumption: { type: number, nullable: true, description: Fuel consumption l/100 km. }
-        avg_consumption_kwh: { type: number, nullable: true, description: Electric consumption kWh/100 km. }
+        avg_consumption: { type: [number, "null"], description: Fuel consumption l/100 km. }
+        avg_consumption_kwh: { type: [number, "null"], description: Electric consumption kWh/100 km. }
         continuity_issues: { type: integer }
         continuity_detail:
           type: array
@@ -7251,8 +7531,8 @@ components:
         liters: { type: number }
         kwh: { type: number, description: Total charged energy (kWh). }
         fuel_cost: { type: number }
-        avg_consumption: { type: number, nullable: true }
-        avg_consumption_kwh: { type: number, nullable: true }
+        avg_consumption: { type: [number, "null"] }
+        avg_consumption_kwh: { type: [number, "null"] }
         liters_incomplete: { type: boolean }
         kwh_incomplete: { type: boolean }
         continuity_issues: { type: integer }

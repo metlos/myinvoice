@@ -1,5 +1,6 @@
 import { api } from './client'
 import type { PaymentMethod } from './invoices'
+import type { CatalogDescriptionSource, CatalogPolicy } from './priceList'
 
 export type Frequency = 'monthly' | 'quarterly' | 'semi_annually' | 'annually'
 export type RecurringStatus = 'active' | 'paused' | 'expired'
@@ -17,6 +18,17 @@ export interface RecurringTemplateItem {
   vat_rate_id: number
   vat_rate_percent?: number
   order_index: number
+  price_list_item_id?: number | null
+  price_list_item_name?: string | null
+  price_list_item_code?: string | null
+  price_list_item_archived?: boolean
+  catalog_policy?: CatalogPolicy
+  description_source?: CatalogDescriptionSource
+  catalog_price_source?: string | null
+  catalog_source_currency_code?: string | null
+  catalog_source_unit_price?: number | null
+  catalog_exchange_rate?: number | null
+  catalog_exchange_rate_date?: string | null
 }
 
 export interface RecurringTemplate {
@@ -67,6 +79,10 @@ export interface RecurringTemplate {
   last_error_at?: string | null
   /** Součet faktury šablony (base + DPH, respektuje reverse_charge) — vrací list(). */
   total_with_vat?: number
+  catalog_total_is_estimate?: boolean
+  catalog_estimate_rate_date?: string | null
+  catalog_state?: 'ok' | 'changed' | 'archived' | 'error'
+  catalog_error?: string | null
   created_at: string
   updated_at: string
 
@@ -106,6 +122,15 @@ export interface RecurringTemplatePayload {
     unit_price_without_vat: number
     vat_rate_id: number
     order_index: number
+    price_list_item_id?: number | null
+    catalog_policy?: CatalogPolicy
+    description_source?: CatalogDescriptionSource
+    catalog_price_source?: string | null
+    catalog_source_currency_code?: string | null
+    catalog_source_unit_price?: number | null
+    catalog_exchange_rate?: number | null
+    catalog_exchange_rate_date?: string | null
+    accept_catalog_changes?: boolean
   }>
 }
 

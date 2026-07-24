@@ -127,18 +127,19 @@ final class CodebookAction
     {
         $q = $request->getQueryParams();
         $country = strtoupper((string) ($q['country'] ?? 'CZ'));
+        $allCountries = in_array($country, ['', '*', 'ALL'], true);
         $activeOn = (string) ($q['active_on'] ?? date('Y-m-d'));
 
         $stmt = $this->db->pdo()->prepare(
             'SELECT id, code, rate_percent, country, label_cs, label_en, is_default, is_reverse_charge,
                     valid_from, valid_to, display_order
                FROM vat_rates
-              WHERE country = ?
+              WHERE (? = 1 OR country = ?)
                 AND valid_from <= ?
                 AND (valid_to IS NULL OR valid_to >= ?)
-              ORDER BY display_order, rate_percent DESC'
+              ORDER BY country, display_order, rate_percent DESC'
         );
-        $stmt->execute([$country, $activeOn, $activeOn]);
+        $stmt->execute([$allCountries ? 1 : 0, $country, $activeOn, $activeOn]);
         $rows = $stmt->fetchAll(\PDO::FETCH_ASSOC);
 
         return Json::ok($response, array_map(fn (array $r) => [

@@ -6,6 +6,7 @@ namespace MyInvoice\Service\Export;
 
 use MyInvoice\Infrastructure\Database\Connection;
 use MyInvoice\Repository\PurchaseInvoiceRepository;
+use MyInvoice\Service\Bank\VariableSymbolNormalizer;
 
 /**
  * Export přijaté faktury do ISDOC / Pohoda XML.
@@ -93,6 +94,7 @@ final class PurchaseInvoiceExportService
         // Náš tenant je v této transakci CUSTOMER (kupující). Vendor je SUPPLIER.
         $ourSnapshot = $this->loadSupplierSnapshot($supplierId);
         $vendorSnapshot = $pi['vendor_snapshot'] ?? $this->loadVendorSnapshot((int) $pi['vendor_id']);
+        $paymentVariableSymbol = $this->paymentVariableSymbol($pi);
 
         // Items mapping — preserve structure (description, quantity, unit_price, vat_rate)
         $items = array_map(function ($it) {
@@ -118,6 +120,8 @@ final class PurchaseInvoiceExportService
                 'advance'     => 'proforma',
                 default       => 'invoice',
             },
+            'document_number' => $pi['vendor_invoice_number'] ?? $pi['varsymbol'] ?? ('P-' . $pi['id']),
+            'internal_document_number' => $pi['varsymbol'] ?? null,
             'varsymbol'       => $pi['varsymbol'] ?? $pi['vendor_invoice_number'] ?? ('P-' . $pi['id']),
             'issue_date'      => $pi['issue_date'],
             'tax_date'        => $pi['tax_date'] ?? $pi['issue_date'],
@@ -137,6 +141,9 @@ final class PurchaseInvoiceExportService
             // Plus pro legacy/fallback code paths v existing exporteru
             'supplier'          => $vendorSnapshot,
             'client'            => $ourSnapshot,
+            'bank_snapshot'     => $this->paymentBankSnapshot($pi, $paymentVariableSymbol),
+            'payment_variable_symbol' => $paymentVariableSymbol !== '' ? $paymentVariableSymbol : null,
+            'payment_constant_symbol' => $pi['payment_constant_symbol'] ?? null,
             'items'             => $items,
             // Rekapitulace DPH + souhrny — oba exportéry je čtou z `vat_breakdown`/`totals`
             // (bez nich byly summary/TaxTotal nulové). Repo je dodává ve find(), ale jiným
@@ -158,6 +165,54 @@ final class PurchaseInvoiceExportService
             // Marker pro export — pomáhá exportérovi vědět, že jde o přijatou
             '_direction'        => 'purchase',
         ];
+    }
+
+    private function paymentVariableSymbol(array $invoice): string
+    {
+        foreach ([
+            (string) ($invoice['payment_variable_symbol'] ?? ''),
+            (string) ($invoice['vendor_invoice_number'] ?? ''),
+            (string) ($invoice['varsymbol'] ?? ''),
+        ] as $candidate) {
+            $normalized = VariableSymbolNormalizer::forPayment($candidate);
+            if ($normalized !== '') {
+                return $normalized;
+            }
+        }
+        return '';
+    }
+
+    /**
+     * ISDOC drží VS uvnitř PaymentMeans/Details, jehož bankovní skupina je povinná.
+     * Proto vracíme snapshot i při samotném VS; prázdné bankovní elementy XSD dovoluje.
+     *
+     * @return array<string,?string>|null
+     */
+    private function paymentBankSnapshot(array $invoice, string $paymentVariableSymbol): ?array
+    {
+        $accountNumber = self::nullableString($invoice['payment_account_number'] ?? null);
+        $bankCode = self::nullableString($invoice['payment_bank_code'] ?? null);
+        $iban = self::nullableString($invoice['payment_iban'] ?? null);
+        $bic = self::nullableString($invoice['payment_bic'] ?? null);
+
+        if ($accountNumber === null && $bankCode === null && $iban === null && $bic === null
+            && $paymentVariableSymbol === '') {
+            return null;
+        }
+
+        return [
+            'account_number' => $accountNumber,
+            'bank_code'      => $bankCode,
+            'bank_name'      => null,
+            'iban'           => $iban,
+            'bic'            => $bic,
+        ];
+    }
+
+    private static function nullableString(mixed $value): ?string
+    {
+        $string = trim((string) ($value ?? ''));
+        return $string !== '' ? $string : null;
     }
 
     /**

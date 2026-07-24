@@ -1,4 +1,4 @@
-# 15. Exporty (PDF ZIP, ISDOC, Pohoda XML, Stereo XML)
+# 15. Exporty (PDF, PDF ZIP, ISDOC, Pohoda XML, Stereo XML)
 
 Pro účetní (interní oddělení nebo externí kancelář) nabízí MyInvoice čtyři
 formáty hromadného exportu **vystavených faktur** a per-faktura export
@@ -13,7 +13,7 @@ formáty hromadného exportu **vystavených faktur** a per-faktura export
 
 | Formát | Pro koho | Co obsahuje |
 |---|---|---|
-| **PDF ZIP** | Klasická archivace | Všechna PDF za zvolené období v ZIP archivu |
+| **PDF / PDF ZIP** | Archivace, hromadný tisk, předání účetní | Jedno PDF na doklad v ZIPu, nebo všechny faktury spojené do jednoho PDF |
 | **ISDOC 6.0.2** | Český národní standard pro B2B výměnu faktur | XML soubor pro každou fakturu, balené v ZIP |
 | **Pohoda XML** | Stormware Pohoda — přímý import bez ručního opisu | Sloučený dataPack XML soubor |
 | **Stereo XML** | Stereo for Windows — import vydaných faktur | Sloučený DocumentPack XML soubor |
@@ -32,6 +32,8 @@ Formulář:
 | Období | Měsíc-rok (např. „Duben 2026") nebo celé čtvrtletí (`Q1` až `Q4`) |
 | Filtrovat podle | Datum vystavení nebo DUZP (u DUZP se při prázdné hodnotě použije datum vystavení) |
 | Typ | Všechny / Faktury / Zálohové / Dobropisy |
+| Spojit faktury do jednoho PDF | Jen pro formát PDF; místo ZIPu vytvoří jeden soubor bez příloh a výkazů práce |
+| Elektronicky podepsat výsledné PDF | Volitelné pro sloučené PDF; použije aktivní podpisový profil pro PDF faktur |
 
 Klik **Stáhnout** → soubor stažen do prohlížeče.
 
@@ -39,9 +41,9 @@ Měsíční režim použij pro běžné předání dokladů za jeden měsíc. Č
 režim použij hlavně pro účetní předání za kvartál; aplikace vybere všechny
 doklady v rozsahu příslušného čtvrtletí podle zvoleného data filtru.
 
-## 15.2 PDF ZIP
+## 15.2 PDF a PDF ZIP
 
-Nejjednodušší archivace. ZIP obsahuje:
+Ve výchozím režimu vznikne ZIP s jedním PDF na každý doklad:
 
 ```
 myinvoice-2026-Q2.zip
@@ -59,6 +61,29 @@ jednotlivých PDF vychází z typu dokladu a variabilního symbolu.
 
 Použití: **roční archivace** pro účetní (předáš ZIP/měsíc), **založení do
 spisu**, **odeslání e-mailem revizorovi**.
+
+### 15.2.1 Jedno sloučené PDF
+
+Volba **Spojit faktury do jednoho PDF** nahradí ZIP jediným souborem se všemi
+doklady za vybrané období. Pořadí odpovídá zvolenému datu filtru a následně ID
+faktury. Výstup je určený zejména pro hromadný tisk nebo jednoduché předání
+externí účetní.
+
+Sloučený soubor obsahuje pouze vlastní faktury. Nepřidávají se e-mailové
+přílohy, vložené ISDOC soubory ani navazující výkazy práce. Každý doklad začíná
+na nové straně.
+
+Volitelná volba **Elektronicky podepsat výsledné PDF** podepíše až hotový
+sloučený soubor. Použije podpisový profil nastavený pro PDF faktur; pokud profil
+nebo jeho certifikát není použitelný, aplikace export zastaví a zobrazí chybu.
+Bez této volby zůstane sloučený soubor nepodepsaný. Nastavení profilů popisuje
+[38. Elektronické podpisy](38_Elektronicke_podpisy.md).
+
+### 15.2.2 Ruční výběr faktur
+
+Pokud nechceš exportovat celé období, otevři **Faktury**, označ nejvýše 100
+dokladů a klikni **PDF export (N)**. Vznikne stejné sloučené PDF pouze z ručně
+vybraných faktur. Také zde lze před stažením zapnout podpis výsledného souboru.
 
 ## 15.3 ISDOC 6.0.2
 
@@ -168,7 +193,7 @@ do účetního systému Pohoda. Na rozdíl od ISDOC je to **jeden velký XML**
 
 Před prvním exportem do Pohody **musíš nastavit Pohoda kódy v dodavateli**:
 
-**Systém → Dodavatelé → [tvůj] → Editovat → záložka Pohoda**
+**Systém → Číselníky → Dodavatelé → [tvůj] → Editovat → záložka Pohoda**
 
 | Pole | Význam | Příklad |
 |---|---|---|
@@ -217,7 +242,8 @@ MyInvoice mapuje DPH sazby na **Pohoda kódy klasifikace**:
 - **Výkaz víceprací** (přílohy se neexportují)
 - **QR platbu** (Pohoda generuje vlastní)
 
-Pokud klient potřebuje přesně tvoji PDF verzi, použij paralelně **PDF ZIP**.
+Pokud klient potřebuje přesně tvoji PDF verzi, použij paralelně **PDF ZIP**
+nebo sloučené PDF.
 
 ## 15.5 Stereo XML
 

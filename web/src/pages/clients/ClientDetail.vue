@@ -423,7 +423,7 @@ const clientActions = computed<ActionItem[]>(() => {
         <dl class="space-y-2 text-sm">
           <div>
             <dt class="text-neutral-500">{{ t('client.email') }}</dt>
-            <dd class="text-neutral-900">{{ client.main_email }}</dd>
+            <dd class="text-neutral-900">{{ client.main_email || '—' }}</dd>
           </div>
           <div v-if="client.phone">
             <dt class="text-neutral-500">{{ t('client.telephone') }}</dt>

@@ -217,7 +217,7 @@ final class IncomeTaxBuilder
             "SELECT s.id, s.company_name, s.street, s.city, s.zip,
                     COALESCE(c.iso2, 'CZ') AS country_iso2,
                     s.ic, s.dic, s.taxpayer_type, s.is_vat_payer, s.financial_office_code,
-                    s.workplace_code, s.data_box_type, s.data_box_id
+                    s.workplace_code, s.data_box_id
                FROM supplier s
           LEFT JOIN countries c ON c.id = s.country_id
               WHERE s.id = ?"

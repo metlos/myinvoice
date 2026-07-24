@@ -105,7 +105,11 @@ final class CronRun
             ]);
         } catch (Throwable $e) {
             // Nesmí přetížit error v cronu — diagnostika je best-effort.
-            fwrite(STDERR, "CronRun::finish failed: " . $e->getMessage() . "\n");
+            // STDERR nemusí existovat mimo CLI SAPI (spawn z UI pod php-cgi/FastCGI).
+            $stderr = defined('STDERR') ? STDERR : fopen('php://stderr', 'wb');
+            if ($stderr !== false) {
+                fwrite($stderr, "CronRun::finish failed: " . $e->getMessage() . "\n");
+            }
         }
     }
 

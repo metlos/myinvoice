@@ -140,6 +140,19 @@ final class StereoXmlExporter
     /**
      * @param array<string,mixed> $invoice
      */
+    /**
+     * @param array<string,mixed> $invoice
+     */
+    private function documentLabelFor(array $invoice): string
+    {
+        $label = trim((string) ($invoice['varsymbol'] ?? ''));
+        if ($label === '') {
+            $label = trim((string) ($invoice['id'] ?? ''));
+        }
+
+        return '#' . ($label !== '' ? $label : '?');
+    }
+
     private function appendVatTotalsAndRows(DOMDocument $xml, DOMElement $document, array $invoice): void
     {
         $currency = $this->currencyCode($invoice);
@@ -153,6 +166,17 @@ final class StereoXmlExporter
                 continue;
             }
             $items[] = $item;
+            if (!empty($item['oss_applicable'])) {
+                // OSS plnění se odvádí v jiném státě a Stereo pro něj nemá typ DPH.
+                // Resolver by zahraniční sazbu propadl na '3' → UO „tuzemské osvobozené
+                // plnění" (u čistě OSS dokladu tiše, u smíšeného matoucí hláškou o jednom
+                // typu DPH). Radši odmítneme export, než abychom účetní podstrčili
+                // nesprávné zařazení.
+                throw new \RuntimeException(sprintf(
+                    'Stereo XML nepodporuje OSS plnění (doklad %s). Řádky v režimu OSS vykažte přes Daně → OSS přiznání a z exportu do Stereo je vyřaďte.',
+                    $this->documentLabelFor($invoice),
+                ));
+            }
             $rowVatResolutions[] = $this->vatTypeResolver->resolveRow($invoice, $item);
         }
 

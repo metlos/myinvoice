@@ -47,6 +47,7 @@ function formCodeLabel(c: string): string {
     dphdp3: t('reports.submissions.form_dphdp3'),
     dphkh1: t('reports.submissions.form_dphkh1'),
     dphshv: t('reports.submissions.form_dphshv'),
+    ossei1: t('reports.submissions.form_ossei1'),
     dpfdp5: t('reports.submissions.form_dpfdp5'),
     dppdp9: t('reports.submissions.form_dppdp9'),
   } as Record<string, string>)[c] || c

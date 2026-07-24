@@ -27,6 +27,7 @@ final class SigningConfig
     {
         return match ($documentType) {
             'work_report' => 'Výkaz práce',
+            'bulk_invoice_export' => 'Hromadný export faktur',
             default => 'Faktura',
         };
     }

@@ -13,6 +13,8 @@ final class Connection
 {
     private ?PDO $pdo = null;
     private readonly LoggerInterface $logger;
+    /** @var array<string,bool> */
+    private array $schemaCache = [];
 
     public function __construct(private readonly Config $config, ?LoggerInterface $logger = null)
     {
@@ -63,6 +65,57 @@ final class Connection
     public function close(): void
     {
         $this->pdo = null;
+        $this->schemaCache = [];
+    }
+
+    public function hasColumn(string $table, string $column): bool
+    {
+        if (!preg_match('/^[A-Za-z0-9_]+$/', $table) || !preg_match('/^[A-Za-z0-9_]+$/', $column)) {
+            throw new \InvalidArgumentException('Neplatný identifikátor databázového schématu.');
+        }
+        $key = "column:{$table}.{$column}";
+        if (array_key_exists($key, $this->schemaCache)) {
+            return $this->schemaCache[$key];
+        }
+
+        $pdo = $this->pdo();
+        if ($pdo->getAttribute(PDO::ATTR_DRIVER_NAME) === 'sqlite') {
+            $rows = $pdo->query("PRAGMA table_info({$table})")->fetchAll(PDO::FETCH_ASSOC);
+            return $this->schemaCache[$key] = array_any(
+                $rows,
+                static fn (array $row): bool => (string) ($row['name'] ?? '') === $column,
+            );
+        }
+
+        $stmt = $pdo->prepare(
+            'SELECT 1 FROM information_schema.COLUMNS
+              WHERE TABLE_SCHEMA = DATABASE() AND TABLE_NAME = ? AND COLUMN_NAME = ? LIMIT 1'
+        );
+        $stmt->execute([$table, $column]);
+        return $this->schemaCache[$key] = $stmt->fetchColumn() !== false;
+    }
+
+    public function hasTable(string $table): bool
+    {
+        if (!preg_match('/^[A-Za-z0-9_]+$/', $table)) {
+            throw new \InvalidArgumentException('Neplatný identifikátor databázového schématu.');
+        }
+        $key = "table:{$table}";
+        if (array_key_exists($key, $this->schemaCache)) {
+            return $this->schemaCache[$key];
+        }
+
+        $pdo = $this->pdo();
+        if ($pdo->getAttribute(PDO::ATTR_DRIVER_NAME) === 'sqlite') {
+            $stmt = $pdo->prepare("SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = ? LIMIT 1");
+        } else {
+            $stmt = $pdo->prepare(
+                'SELECT 1 FROM information_schema.TABLES
+                  WHERE TABLE_SCHEMA = DATABASE() AND TABLE_NAME = ? LIMIT 1'
+            );
+        }
+        $stmt->execute([$table]);
+        return $this->schemaCache[$key] = $stmt->fetchColumn() !== false;
     }
 
     public function ping(): bool

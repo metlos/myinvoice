@@ -70,8 +70,8 @@ V hlavičce konceptu je pole **Číslo faktury** (resp. „Číslo zálohové fa
 > Pokud chceš číslo změnit, musíš vystavit storno/dobropis a fakturu vystavit
 > znovu pod jiným číslem.
 
-Šablonu pro automatické generování nastavuješ v **Systém → Dodavatelé →
-[tvůj dodavatel] → Číslování faktur** — viz [§ 35.5.3](35_Multi_supplier.md#3553-cislovani-faktur).
+Šablonu pro automatické generování nastavuješ v **Systém → Číselníky →
+Dodavatelé → [tvůj dodavatel] → Číslování faktur** — viz [§ 35.5.3](35_Multi_supplier.md#3553-cislovani-faktur).
 
 ### 10.2.6 Ceny „s DPH" vs „bez DPH" (brutto / netto režim)
 
@@ -108,6 +108,19 @@ DPH výkazy (přiznání, kontrolní hlášení, kniha DPH) ukazují stejné č�
 ## 10.3 Položky
 
 Tabulka řádků faktury. Tlačítko **+ Přidat položku** přidá nový řádek.
+
+Vedle něj je volba **Přidat z ceníku**. Po výběru položky systém použije cenu
+pro aktuálního zákazníka a měnu dokladu. Přednost má individuální cena
+zákazníka, potom pevná cena ceníku v měně dokladu a nakonec povolený kurzový
+přepočet ze základní měny. Ceníková položka musí používat stejný režim cen
+s DPH nebo bez DPH jako doklad.
+
+Ve výběru lze hledat podle kódu a názvu. U každé nabídky je uvedena výsledná
+cena a její zdroj; u kurzového přepočtu také datum použitého kurzovního lístku.
+
+Vložený řádek je samostatný snapshot. Lze jej dále upravit a pozdější změna
+ceníku, zákazníka nebo kurzu jej automaticky nepřecení. Správa ceníku je popsána
+v [§ 36.1.5](36_Nastaveni.md#3615-cenikove-polozky).
 
 | Sloupec | Význam |
 |---|---|

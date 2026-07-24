@@ -300,6 +300,11 @@ const recurringActions = computed<ActionItem[]>(() => {
         </div>
       </div>
 
+      <div v-if="tpl.catalog_state && tpl.catalog_state !== 'ok'" class="rounded-md border border-warning-200 bg-warning-50 px-4 py-3 text-sm text-warning-700" :title="tpl.catalog_error ?? ''">
+        <strong>{{ t('recurring.catalog_state_' + tpl.catalog_state) }}</strong>
+        <span v-if="tpl.catalog_error"> · {{ tpl.catalog_error }}</span>
+      </div>
+
       <!-- Poznámka nad položkami -->
       <div v-if="tpl.note_above_items" class="bg-surface border border-neutral-200 rounded-lg p-5 shadow-sm">
         <h3 class="text-sm font-semibold uppercase tracking-wide text-neutral-500 mb-2">{{ t('invoice.note_above') }}</h3>
@@ -324,7 +329,14 @@ const recurringActions = computed<ActionItem[]>(() => {
           </thead>
           <tbody class="divide-y divide-neutral-100">
             <tr v-for="it in tpl.items" :key="it.id">
-              <td class="px-4 py-2">{{ it.description }}</td>
+              <td class="px-4 py-2">
+                <div>{{ it.description }}</div>
+                <div v-if="it.price_list_item_id" class="mt-1 flex flex-wrap items-center gap-1 text-xs">
+                  <span class="status-badge bg-primary-50 text-primary-700">{{ t('recurring.catalog_badge') }}</span>
+                  <span class="text-neutral-500">{{ it.price_list_item_code }} · {{ t('recurring.catalog_policy_' + (it.catalog_policy ?? 'fixed')) }}</span>
+                  <span v-if="it.price_list_item_archived" class="status-badge bg-warning-50 text-warning-700">{{ t('recurring.catalog_archived') }}</span>
+                </div>
+              </td>
               <td class="px-4 py-2 text-right font-mono">{{ it.quantity }}</td>
               <td class="px-4 py-2">{{ it.unit }}</td>
               <td class="px-4 py-2 text-right font-mono">{{ formatMoney(displayUnitPriceNet(it), tpl.currency ?? '') }}</td>

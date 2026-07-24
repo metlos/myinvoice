@@ -52,6 +52,21 @@ final class PohodaXmlExporter
     public const NS_INV = 'http://www.stormware.cz/schema/version_2/invoice.xsd';
     public const NS_TYP = 'http://www.stormware.cz/schema/version_2/type.xsd';
 
+    /**
+     * Délkové facety `typ:addressType` z type.xsd. Delší hodnota shodí XSD validaci,
+     * takže se ořezává (mb_substr kvůli diakritice). Adresa je identifikační údaj,
+     * ne částka — zkrácení je přijatelnější než neexportovatelný doklad.
+     */
+    private const ADDR_MAX = [
+        'company' => 255,  // typ:stringCompany
+        'name'    => 64,   // typ:string64
+        'street'  => 64,   // typ:string64
+        'city'    => 45,   // typ:string45
+        'zip'     => 15,   // typ:string15
+        'email'   => 98,   // typ:string98
+        'phone'   => 40,   // typ:string40
+    ];
+
     private readonly InvoiceExportDataResolver $dataResolver;
 
     public function __construct(
@@ -241,20 +256,20 @@ final class PohodaXmlExporter
             $client = $isPurchase ? $this->resolveSupplier($invoice) : $this->resolveClient($invoice);
             $partner = $dom->createElementNS(self::NS_INV, 'inv:partnerIdentity');
             $address = $dom->createElementNS(self::NS_TYP, 'typ:address');
-            $this->el($dom, $address, self::NS_TYP, 'typ:company', (string) ($client['company_name'] ?? ''));
+            $this->el($dom, $address, self::NS_TYP, 'typ:company', $this->addr($client['company_name'] ?? '', 'company'));
             if (!empty($client['ic']))  $this->el($dom, $address, self::NS_TYP, 'typ:ico', (string) $client['ic']);
             if (!empty($client['dic'])) $this->el($dom, $address, self::NS_TYP, 'typ:dic', (string) $client['dic']);
-            $this->el($dom, $address, self::NS_TYP, 'typ:street', (string) ($client['street'] ?? ''));
-            $this->el($dom, $address, self::NS_TYP, 'typ:city',   (string) ($client['city'] ?? ''));
-            $this->el($dom, $address, self::NS_TYP, 'typ:zip',    (string) ($client['zip'] ?? ''));
+            $this->el($dom, $address, self::NS_TYP, 'typ:street', $this->addr($client['street'] ?? '', 'street'));
+            $this->el($dom, $address, self::NS_TYP, 'typ:city',   $this->addr($client['city'] ?? '', 'city'));
+            $this->el($dom, $address, self::NS_TYP, 'typ:zip',    $this->addr($client['zip'] ?? '', 'zip'));
             if (!empty($client['country_iso2'])) {
                 $country = $dom->createElementNS(self::NS_TYP, 'typ:country');
                 $this->el($dom, $country, self::NS_TYP, 'typ:ids', (string) $client['country_iso2']);
                 $address->appendChild($country);
             }
             $email = $client['email'] ?? $client['main_email'] ?? null;
-            if ($email) $this->el($dom, $address, self::NS_TYP, 'typ:email', (string) $email);
-            if (!empty($client['phone'])) $this->el($dom, $address, self::NS_TYP, 'typ:phone', (string) $client['phone']);
+            if ($email) $this->el($dom, $address, self::NS_TYP, 'typ:email', $this->addr($email, 'email'));
+            if (!empty($client['phone'])) $this->el($dom, $address, self::NS_TYP, 'typ:phone', $this->addr($client['phone'], 'phone'));
             $partner->appendChild($address);
             $hdr->appendChild($partner);
 
@@ -393,6 +408,12 @@ final class PohodaXmlExporter
         $wrap = $dom->createElementNS(self::NS_INV, $name);
         $this->el($dom, $wrap, self::NS_TYP, 'typ:ids', $code);
         $parent->appendChild($wrap);
+    }
+
+    /** Ořízne adresní pole na délkový facet z type.xsd (viz self::ADDR_MAX). */
+    private function addr(mixed $value, string $field): string
+    {
+        return mb_substr(trim((string) $value), 0, self::ADDR_MAX[$field]);
     }
 
     private function el(\DOMDocument $dom, \DOMElement $parent, string $ns, string $name, string $value): \DOMElement

@@ -60,6 +60,8 @@ final class KhDphTaxScenariosTest extends TestCase
     private array $purchaseIds = [];
     /** @var int[] */
     private array $vatClassificationIds = [];
+    /** @var int[] Měny vytvořené v testu (EUR pro kurzové scénáře) — úklid v tearDown. */
+    private array $createdCurrencyIds = [];
     /** Původní plátcovství supplier-a — test vynucuje plátce (viz setUp). */
     private ?array $origVatFlags = null;
 
@@ -99,10 +101,10 @@ final class KhDphTaxScenariosTest extends TestCase
         // řádků — reálné nastavení dodavatele v dev DB by testy rozbilo. Vynutit
         // plátce a v tearDown vrátit (IO režim kryje IdentifiedPersonDphTest).
         $flags = $pdo->query(
-            "SELECT is_vat_payer, is_identified FROM supplier WHERE id = {$this->supplierId}"
+            "SELECT is_vat_payer, is_identified, dic FROM supplier WHERE id = {$this->supplierId}"
         )->fetch(\PDO::FETCH_ASSOC) ?: [];
         $this->origVatFlags = $flags;
-        $pdo->prepare('UPDATE supplier SET is_vat_payer = 1, is_identified = 0 WHERE id = ?')
+        $pdo->prepare("UPDATE supplier SET is_vat_payer = 1, is_identified = 0, dic = 'CZ12345678' WHERE id = ?")
             ->execute([$this->supplierId]);
     }
 
@@ -113,10 +115,11 @@ final class KhDphTaxScenariosTest extends TestCase
         }
         $pdo = $this->db->pdo();
         if ($this->origVatFlags !== null && $this->supplierId > 0) {
-            $pdo->prepare('UPDATE supplier SET is_vat_payer = ?, is_identified = ? WHERE id = ?')
+            $pdo->prepare('UPDATE supplier SET is_vat_payer = ?, is_identified = ?, dic = ? WHERE id = ?')
                 ->execute([
                     (int) ($this->origVatFlags['is_vat_payer'] ?? 1),
                     (int) ($this->origVatFlags['is_identified'] ?? 0),
+                    $this->origVatFlags['dic'] ?? null,
                     $this->supplierId,
                 ]);
         }
@@ -133,6 +136,11 @@ final class KhDphTaxScenariosTest extends TestCase
         }
         foreach ($this->vatClassificationIds as $id) {
             $pdo->prepare('DELETE FROM vat_classifications WHERE id = ? AND supplier_id = ?')
+                ->execute([$id, $this->supplierId]);
+        }
+        // Měny až po fakturách (FK invoices.currency_id).
+        foreach ($this->createdCurrencyIds as $id) {
+            $pdo->prepare('DELETE FROM currencies WHERE id = ? AND supplier_id = ?')
                 ->execute([$id, $this->supplierId]);
         }
         $this->db->close(); // uvolni MySQL connection (kumulace přes běh → max_connections)
@@ -1211,8 +1219,9 @@ final class KhDphTaxScenariosTest extends TestCase
     }
 
     /**
-     * Audit 2026-07 (fix 7): Souhrnné hlášení — Řecko se vykazuje DPH kódem 'EL',
-     * ne ISO 'GR'. Platí pro k_stat i prefix VAT ID (VIES používá 'EL').
+     * Audit 2026-07 (fix 7) + issue #238: Souhrnné hlášení — Řecko se vykazuje DPH
+     * kódem 'EL', ne ISO 'GR' (VIES používá 'EL'). Kód země patří do k_stat; c_vat
+     * nese DIČ BEZ prefixu země.
      */
     public function testShGreeceReportedAsElNotGr(): void
     {
@@ -1225,8 +1234,8 @@ final class KhDphTaxScenariosTest extends TestCase
             $this->markTestSkipped('GR není označeno jako EU — SH test přeskočen.');
         }
         $d = fn (int $day) => sprintf('%04d-%02d-%02d', self::YEAR, self::MONTH, $day);
-        // Řecký odběratel, VAT ID BEZ prefixu → normalizeVatId prefix doplní (musí být EL).
-        $euCust = $this->client('Řecký odběratel', $grId, '123456789', customer: true);
+        // Řecký odběratel, DIČ i s ISO prefixem 'GR' → k_stat musí být EL a c_vat bez prefixu.
+        $euCust = $this->client('Řecký odběratel', $grId, 'GR123456789', customer: true);
         // Poskytnutí služby do JČS (kód 22 → SHV typ 3).
         $this->sale('2099067701', $euCust, '22', false, $d(10), $d(10), [[15000, 0, 0]]);
 
@@ -1235,7 +1244,103 @@ final class KhDphTaxScenariosTest extends TestCase
         $veta = $xml->DPHSHV->VetaR;
         $this->assertCount(1, $veta, 'SH: jeden řádek pro řeckého odběratele');
         $this->assertSame('EL', (string) $veta[0]['k_stat'], 'k_stat musí být DPH kód EL, ne ISO GR');
-        $this->assertSame('EL123456789', (string) $veta[0]['c_vat'], 'VAT ID prefix musí být EL, ne GR');
+        $this->assertSame('123456789', (string) $veta[0]['c_vat'], 'c_vat musí být DIČ BEZ prefixu (kód země je v k_stat)');
+    }
+
+    /**
+     * Issue #238 (body 1+2): řádné SH má shvies_forma="R" (EPO regex [RN], ne staré "B")
+     * a řádky VetaR NEmají atribut k_storno (ten je jen pro následné hlášení).
+     */
+    public function testShFormaIsRAndVetaRHasNoStorno(): void
+    {
+        $d = fn (int $day) => sprintf('%04d-%02d-%02d', self::YEAR, self::MONTH, $day);
+        $euCust = $this->client('SK odběratel', $this->skId, 'SK1234567', customer: true);
+        $this->sale('2099067711', $euCust, '22', false, $d(10), $d(10), [[15000, 0, 0]]);
+
+        $xml = new \SimpleXMLElement($this->shv->build($this->supplierId, self::YEAR, self::MONTH)['xml']);
+        $this->assertSame('R', (string) $xml->DPHSHV->VetaD['shvies_forma'], 'řádné SH → shvies_forma="R"');
+        $veta = $xml->DPHSHV->VetaR;
+        $this->assertCount(1, $veta);
+        $this->assertFalse(isset($veta[0]['k_storno']), 'řádné hlášení: VetaR nesmí mít k_storno');
+    }
+
+    /**
+     * Issue #238 (bod 3): c_vat nese DIČ BEZ prefixu země, kód země je v k_stat.
+     * SK2020122753 → k_stat="SK", c_vat="2020122753". Ověřuje i doklad zadaný BEZ prefixu.
+     */
+    public function testShSlovakVatIdPrefixStripped(): void
+    {
+        $d = fn (int $day) => sprintf('%04d-%02d-%02d', self::YEAR, self::MONTH, $day);
+        $withPrefix = $this->client('SK s prefixem', $this->skId, 'SK2020122753', customer: true);
+        $noPrefix   = $this->client('SK bez prefixu', $this->skId, '2020122888', customer: true);
+        $this->sale('2099067712', $withPrefix, '22', false, $d(10), $d(10), [[15000, 0, 0]]);
+        $this->sale('2099067713', $noPrefix,   '22', false, $d(11), $d(11), [[15000, 0, 0]]);
+
+        $xml = new \SimpleXMLElement($this->shv->build($this->supplierId, self::YEAR, self::MONTH)['xml']);
+        $vats = [];
+        foreach ($xml->DPHSHV->VetaR as $v) {
+            $this->assertSame('SK', (string) $v['k_stat']);
+            $vats[(string) $v['c_vat']] = true;
+        }
+        $this->assertArrayHasKey('2020122753', $vats, 'prefix SK musí být z c_vat stržen');
+        $this->assertArrayHasKey('2020122888', $vats, 'DIČ bez prefixu zůstává beze změny');
+    }
+
+    /**
+     * Issue #238 (bod 3): nestrhávat libovolná 2 písmena — francouzské DIČ má
+     * alfanumerickou vnitrostátní část. FR + "FRAB123456789" → c_vat "AB123456789"
+     * (stržen jen prefix FR, "AB" zůstává).
+     */
+    public function testShFrenchAlphanumericVatIdKeepsNationalPart(): void
+    {
+        $frId = $this->countryId('FR');
+        if ($frId === 0) {
+            $this->markTestSkipped('Země FR není v číselníku countries.');
+        }
+        $d = fn (int $day) => sprintf('%04d-%02d-%02d', self::YEAR, self::MONTH, $day);
+        $frCust = $this->client('FR odběratel', $frId, 'FRAB123456789', customer: true);
+        $this->sale('2099067714', $frCust, '22', false, $d(10), $d(10), [[15000, 0, 0]]);
+
+        $xml = new \SimpleXMLElement($this->shv->build($this->supplierId, self::YEAR, self::MONTH)['xml']);
+        $veta = $xml->DPHSHV->VetaR;
+        $this->assertCount(1, $veta);
+        $this->assertSame('FR', (string) $veta[0]['k_stat']);
+        $this->assertSame('AB123456789', (string) $veta[0]['c_vat'], 'strhává se jen prefix země, ne první 2 znaky');
+    }
+
+    /**
+     * Issue #238 (body 4+6): EUR dodávka bez kurzu se NEvykáže s náhradním kurzem 1.0.
+     * build() nehodí chybu, ale vrátí doklad v `missing_rates` + varování; base se
+     * počítá uloženým kurzem, když je k dispozici.
+     */
+    public function testShMissingExchangeRateFlaggedNotSilentlyOne(): void
+    {
+        $d = fn (int $day) => sprintf('%04d-%02d-%02d', self::YEAR, self::MONTH, $day);
+        $eur = $this->eurCurrencyId();
+        $euCust = $this->client('SK EUR odběratel', $this->skId, 'SK7777777', customer: true);
+        // EUR faktura BEZ zafixovaného kurzu (exchange_rate NULL).
+        $this->sale('2099067715', $euCust, '22', false, $d(10), $d(10), [[1000, 0, 0]], $eur, null);
+
+        $res = $this->shv->build($this->supplierId, self::YEAR, self::MONTH);
+        $this->assertNotEmpty($res['missing_rates'], 'EUR bez kurzu musí být v missing_rates');
+        $this->assertSame('sale', $res['missing_rates'][0]['source']);
+        $this->assertSame('EUR', $res['missing_rates'][0]['currency']);
+        $this->assertTrue(
+            (bool) array_filter($res['warnings'], static fn ($w) => str_contains($w, 'kurz')),
+            'náhled musí varovat o chybějícím kurzu',
+        );
+
+        // Se zafixovaným kurzem (25.0) už chybějící kurz není a base_czk = 1000 × 25.
+        $eur2 = $this->eurCurrencyId();
+        $euCust2 = $this->client('SK EUR s kurzem', $this->skId, 'SK8888888', customer: true);
+        $this->sale('2099067716', $euCust2, '22', false, $d(12), $d(12), [[1000, 0, 0]], $eur2, 25.0);
+        $res2 = $this->shv->build($this->supplierId, self::YEAR, self::MONTH);
+        $row = null;
+        foreach ($res2['summary']['rows'] as $r) {
+            if ($r['vat_id'] === '8888888') { $row = $r; break; }
+        }
+        $this->assertNotNull($row, 'řádek s kurzem musí být v summary');
+        $this->assertEqualsWithDelta(25000.0, $row['amount'], 0.01, 'base_czk = 1000 EUR × 25.0');
     }
 
     /**
@@ -1605,6 +1710,25 @@ final class KhDphTaxScenariosTest extends TestCase
         return (int) ($stmt->fetchColumn() ?: 0);
     }
 
+    /** EUR měna pro tenanta — reuse existující, jinak vytvoř (úklid v tearDown). */
+    private function eurCurrencyId(): int
+    {
+        $pdo = $this->db->pdo();
+        $stmt = $pdo->prepare("SELECT id FROM currencies WHERE supplier_id = ? AND code = 'EUR' ORDER BY id LIMIT 1");
+        $stmt->execute([$this->supplierId]);
+        $id = (int) ($stmt->fetchColumn() ?: 0);
+        if ($id !== 0) {
+            return $id;
+        }
+        $pdo->prepare(
+            "INSERT INTO currencies (supplier_id, code, label, symbol, name_cs, name_en, decimals, is_active, is_default)
+             VALUES (?, 'EUR', 'EUR', '€', 'Euro', 'Euro', 2, 1, 0)"
+        )->execute([$this->supplierId]);
+        $id = (int) $pdo->lastInsertId();
+        $this->createdCurrencyIds[] = $id;
+        return $id;
+    }
+
     private function client(string $name, int $countryId, ?string $dic, bool $customer = false, bool $vendor = false): int
     {
         $stmt = $this->db->pdo()->prepare(
@@ -1622,19 +1746,19 @@ final class KhDphTaxScenariosTest extends TestCase
     /**
      * @param list<array{0:float,1:float,2:float}> $items [base, vat, vat_rate_snapshot]
      */
-    private function sale(string $varsymbol, int $clientId, ?string $code, bool $rc, string $issue, string $tax, array $items): void
+    private function sale(string $varsymbol, int $clientId, ?string $code, bool $rc, string $issue, string $tax, array $items, ?int $currencyId = null, ?float $exchangeRate = null): void
     {
         [$base, $vat, $with] = $this->sumItems($items);
         $stmt = $this->db->pdo()->prepare(
             'INSERT INTO invoices
                 (supplier_id, varsymbol, invoice_type, client_id, issue_date, tax_date, due_date,
-                 currency_id, reverse_charge, total_without_vat, total_vat, total_with_vat,
+                 currency_id, exchange_rate, reverse_charge, total_without_vat, total_vat, total_with_vat,
                  status, vat_classification_code, created_by)
-             VALUES (?, ?, "invoice", ?, ?, ?, ?, ?, ?, ?, ?, ?, "issued", ?, ?)'
+             VALUES (?, ?, "invoice", ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, "issued", ?, ?)'
         );
         $stmt->execute([
             $this->supplierId, $varsymbol, $clientId, $issue, $tax, $issue,
-            $this->currencyId, $rc ? 1 : 0, $base, $vat, $with, $code, $this->userId,
+            $currencyId ?? $this->currencyId, $exchangeRate, $rc ? 1 : 0, $base, $vat, $with, $code, $this->userId,
         ]);
         $id = (int) $this->db->pdo()->lastInsertId();
         $this->invoiceIds[] = $id;

@@ -30,8 +30,7 @@ final class InvoiceRepository
     private function supportsIncomeTaxExempt(): bool
     {
         if ($this->hasIncomeTaxExempt === null) {
-            $col = $this->db->pdo()->query("SHOW COLUMNS FROM invoices LIKE 'income_tax_exempt'")->fetch();
-            $this->hasIncomeTaxExempt = $col !== false;
+            $this->hasIncomeTaxExempt = $this->db->hasColumn('invoices', 'income_tax_exempt');
         }
         return $this->hasIncomeTaxExempt;
     }
@@ -47,10 +46,20 @@ final class InvoiceRepository
     private function supportsAutoSendReminders(): bool
     {
         if ($this->hasAutoSendReminders === null) {
-            $col = $this->db->pdo()->query("SHOW COLUMNS FROM invoices LIKE 'auto_send_reminders'")->fetch();
-            $this->hasAutoSendReminders = $col !== false;
+            $this->hasAutoSendReminders = $this->db->hasColumn('invoices', 'auto_send_reminders');
         }
         return $this->hasAutoSendReminders;
+    }
+
+    /** Cache existence OSS sloupců na invoice_items (migrace 0137). */
+    private ?bool $hasOssItemColumns = null;
+
+    private function supportsOssItemColumns(): bool
+    {
+        if ($this->hasOssItemColumns === null) {
+            $this->hasOssItemColumns = $this->db->hasColumn('invoice_items', 'oss_applicable');
+        }
+        return $this->hasOssItemColumns;
     }
 
     public function find(int $id): ?array
@@ -427,12 +436,17 @@ final class InvoiceRepository
 
     public function itemsFor(int $invoiceId): array
     {
+        $ossSelect = $this->supportsOssItemColumns()
+            ? ', ii.oss_applicable, ii.oss_consumer_country, ii.oss_rate_type, ii.oss_supply_type,
+                    ii.oss_exchange_rate, ii.oss_exchange_rate_date, ii.oss_taxable_amount_return,
+                    ii.oss_vat_amount_return, ii.oss_original_period'
+            : '';
         $stmt = $this->db->pdo()->prepare(
             'SELECT ii.id, ii.invoice_id, ii.description, ii.quantity, ii.unit,
                     ii.unit_price_without_vat, ii.vat_rate_id, ii.vat_rate_snapshot,
                     ii.total_without_vat, ii.total_vat, ii.total_with_vat,
                     ii.order_index, ii.item_kind, ii.linked_work_report_id,
-                    ii.vat_classification_code,
+                    ii.vat_classification_code' . $ossSelect . ',
                     vr.code AS vat_code, vr.label_cs AS vat_label_cs, vr.label_en AS vat_label_en
                FROM invoice_items ii
                JOIN vat_rates vr ON vr.id = ii.vat_rate_id
@@ -706,12 +720,22 @@ final class InvoiceRepository
 
         // Supplier_id se odvodí z client (immutable per client)
         $clientId = (int) $data['client_id'];
-        $stmt = $pdo->prepare('SELECT supplier_id FROM clients WHERE id = ?');
+        $stmt = $pdo->prepare(
+            'SELECT c.supplier_id, c.default_branding_profile_id, s.default_branding_profile_id AS supplier_branding_profile_id,
+                    s.branding_profiles_enabled
+               FROM clients c JOIN supplier s ON s.id = c.supplier_id WHERE c.id = ?'
+        );
         $stmt->execute([$clientId]);
-        $supplierId = (int) $stmt->fetchColumn();
-        if ($supplierId === 0) {
+        $client = $stmt->fetch(PDO::FETCH_ASSOC);
+        if ($client === false) {
             throw new \InvalidArgumentException("Client #$clientId nenalezen.");
         }
+        $supplierId = (int) $client['supplier_id'];
+        $brandingProfileId = empty($client['branding_profiles_enabled']) ? null : (array_key_exists('branding_profile_id', $data)
+            ? $this->resolveBrandingProfileId($data['branding_profile_id'], $supplierId)
+            : ($client['default_branding_profile_id'] !== null
+                ? (int) $client['default_branding_profile_id']
+                : ($client['supplier_branding_profile_id'] !== null ? (int) $client['supplier_branding_profile_id'] : null)));
 
         // Výchozí kategorie tržby — explicitní volba vyhrává, jinak default zakázky >
         // klienta (sdílený helper, viz resolveDefaultRevenueCategoryId). Stejnou logiku
@@ -738,14 +762,14 @@ final class InvoiceRepository
         $hasExempt = $this->supportsIncomeTaxExempt();
         $hasReminders = $this->supportsAutoSendReminders();
         $sql = 'INSERT INTO invoices
-            (invoice_type, parent_invoice_id, client_id, project_id, supplier_id,
+            (invoice_type, parent_invoice_id, client_id, project_id, supplier_id, branding_profile_id,
              issue_date, tax_date, due_date, currency_id, reverse_charge, prices_include_vat, language,
              note_above_items, note_below_items, advance_paid_amount, discount_percent, varsymbol,
              payment_method, status, vat_classification_code, revenue_category, revenue_category_id,'
             . ($hasExempt ? ' income_tax_exempt, income_tax_exempt_reason,' : '')
             . ($hasReminders ? ' auto_send_reminders,' : '')
             . ' created_by)
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, "draft", ?, ?, ?,'
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, "draft", ?, ?, ?,'
             . ($hasExempt ? ' ?, ?,' : '')
             . ($hasReminders ? ' ?,' : '')
             . ' ?)';
@@ -756,6 +780,7 @@ final class InvoiceRepository
             $clientId,
             isset($data['project_id']) && $data['project_id'] ? (int) $data['project_id'] : null,
             $supplierId,
+            $brandingProfileId,
             (string) $data['issue_date'],
             ($data['invoice_type'] ?? 'invoice') === 'proforma' ? null : (string) ($data['tax_date'] ?? $data['issue_date']),
             (string) $data['due_date'],
@@ -823,9 +848,18 @@ final class InvoiceRepository
 
         $hasExempt = $this->supportsIncomeTaxExempt();
         $hasReminders = $this->supportsAutoSendReminders();
+        $currentStmt = $this->db->pdo()->prepare('SELECT supplier_id, branding_profile_id FROM invoices WHERE id = ?');
+        $currentStmt->execute([$id]);
+        $current = $currentStmt->fetch(PDO::FETCH_ASSOC);
+        if ($current === false) {
+            throw new \InvalidArgumentException("Invoice #$id nenalezena.");
+        }
+        $brandingProfileId = array_key_exists('branding_profile_id', $data)
+            ? $this->resolveBrandingProfileId($data['branding_profile_id'], (int) $current['supplier_id'])
+            : ($current['branding_profile_id'] !== null ? (int) $current['branding_profile_id'] : null);
 
         $sql = 'UPDATE invoices SET
-                client_id = ?, project_id = ?,
+                client_id = ?, project_id = ?, branding_profile_id = ?,
                 issue_date = ?, tax_date = ?, due_date = ?,
                 currency_id = ?, reverse_charge = ?, prices_include_vat = ?, language = ?,
                 note_above_items = ?, note_below_items = ?,
@@ -841,6 +875,7 @@ final class InvoiceRepository
         $params = [
             (int) $data['client_id'],
             isset($data['project_id']) && $data['project_id'] ? (int) $data['project_id'] : null,
+            $brandingProfileId,
             (string) $data['issue_date'],
             empty($data['tax_date']) ? null : (string) $data['tax_date'],
             (string) $data['due_date'],
@@ -891,13 +926,25 @@ final class InvoiceRepository
         $pdo = $this->db->pdo();
         $pdo->prepare('DELETE FROM invoice_items WHERE invoice_id = ?')->execute([$invoiceId]);
 
-        $stmt = $pdo->prepare(
-            'INSERT INTO invoice_items
+        $supportsOss = $this->supportsOssItemColumns();
+        $stmt = $supportsOss
+            ? $pdo->prepare(
+                'INSERT INTO invoice_items
+                    (invoice_id, description, quantity, unit, unit_price_without_vat,
+                     vat_rate_id, vat_rate_snapshot,
+                     total_without_vat, total_vat, total_with_vat, order_index, item_kind, vat_classification_code,
+                     oss_applicable, oss_consumer_country, oss_rate_type, oss_supply_type,
+                     oss_exchange_rate, oss_exchange_rate_date, oss_taxable_amount_return,
+                     oss_vat_amount_return, oss_original_period)
+                 VALUES (?, ?, ?, ?, ?, ?, ?, 0, 0, 0, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)'
+            )
+            : $pdo->prepare(
+                'INSERT INTO invoice_items
                 (invoice_id, description, quantity, unit, unit_price_without_vat,
                  vat_rate_id, vat_rate_snapshot,
                  total_without_vat, total_vat, total_with_vat, order_index, item_kind, vat_classification_code)
              VALUES (?, ?, ?, ?, ?, ?, ?, 0, 0, 0, ?, ?, ?)'
-        );
+            );
 
         $vatRates = $this->loadVatRates();
 
@@ -935,7 +982,7 @@ final class InvoiceRepository
             $code = $item['vat_classification_code']
                 ?? self::defaultSaleClassificationCode($rate, $reverseCharge, $countryIso, (string) ($item['unit'] ?? '') ?: null);
             $orderIndex = (int) ($item['order_index'] ?? $i);
-            $stmt->execute([
+            $params = [
                 $invoiceId,
                 (string) ($item['description'] ?? ''),
                 (float) ($item['quantity'] ?? 1),
@@ -946,12 +993,23 @@ final class InvoiceRepository
                 $orderIndex,
                 'standard',
                 $code !== null ? (string) $code : null,
-            ]);
+            ];
+            if ($supportsOss) {
+                $params = array_merge($params, self::ossItemParams($item));
+            }
+            $stmt->execute($params);
 
             $maxOrder = max($maxOrder, $orderIndex);
             if ($discountPercent > 0) {
                 $base = round((float) ($item['quantity'] ?? 1) * (float) ($item['unit_price_without_vat'] ?? 0), 2);
+                $oss = $supportsOss ? self::ossItemParams($item) : [];
                 $key = $vatRateId . '|' . ($code ?? '');
+                if ($supportsOss) {
+                    $ossKey = $oss;
+                    $ossKey[6] = null;
+                    $ossKey[7] = null;
+                    $key .= '|' . implode('|', array_map(static fn ($v) => $v === null ? '' : (string) $v, $ossKey));
+                }
                 if (!isset($discountGroups[$key])) {
                     $discountGroups[$key] = [
                         'vat_rate_id' => $vatRateId,
@@ -959,13 +1017,31 @@ final class InvoiceRepository
                         'code'        => $code,
                         'base'        => 0.0,
                     ];
+                    if ($supportsOss) {
+                        $discountGroups[$key]['oss'] = $oss;
+                    }
+                } elseif ($supportsOss) {
+                    foreach ([6, 7] as $amountIndex) {
+                        if ($oss[$amountIndex] !== null) {
+                            $discountGroups[$key]['oss'][$amountIndex] =
+                                (float) ($discountGroups[$key]['oss'][$amountIndex] ?? 0.0) + (float) $oss[$amountIndex];
+                        }
+                    }
                 }
                 $discountGroups[$key]['base'] += $base;
             }
         }
 
         if ($discountPercent > 0 && $discountGroups !== []) {
-            $this->materializeDiscountLines($stmt, $invoiceId, $discountPercent, $discountGroups, $maxOrder + 1, $language);
+            $this->materializeDiscountLines(
+                $stmt,
+                $invoiceId,
+                $discountPercent,
+                $discountGroups,
+                $maxOrder + 1,
+                $language,
+                $supportsOss,
+            );
         }
     }
 
@@ -984,6 +1060,7 @@ final class InvoiceRepository
         array $groups,
         int $startOrder,
         string $language,
+        bool $supportsOss,
     ): void {
         $label = self::discountLabel($discountPercent, $language);
         $order = $startOrder;
@@ -992,7 +1069,7 @@ final class InvoiceRepository
             if ($disc == 0.0) {
                 continue;
             }
-            $stmt->execute([
+            $params = [
                 $invoiceId,
                 $label,
                 1.0,
@@ -1003,8 +1080,62 @@ final class InvoiceRepository
                 $order++,
                 'discount',
                 $g['code'] !== null ? (string) $g['code'] : null,
-            ]);
+            ];
+            if ($supportsOss && isset($g['oss']) && is_array($g['oss'])) {
+                $oss = $g['oss'];
+                foreach ([6, 7] as $amountIndex) {
+                    if ($oss[$amountIndex] !== null) {
+                        $oss[$amountIndex] = -round((float) $oss[$amountIndex] * $discountPercent / 100.0, 2);
+                    }
+                }
+                $params = array_merge($params, $oss);
+            }
+            $stmt->execute($params);
         }
+    }
+
+    /** @return list<mixed> */
+    private static function ossItemParams(array $item): array
+    {
+        $applicable = !empty($item['oss_applicable']) ? 1 : 0;
+        if ($applicable === 0) {
+            return [0, null, null, null, null, null, null, null, null];
+        }
+
+        $country = strtoupper(trim((string) ($item['oss_consumer_country'] ?? '')));
+        $country = preg_match('/^[A-Z]{2}$/', $country) ? $country : null;
+
+        $rateType = trim((string) ($item['oss_rate_type'] ?? ''));
+        $rateType = in_array($rateType, ['standard', 'reduced', 'second_reduced', 'parking'], true)
+            ? $rateType
+            : null;
+
+        $supplyType = (string) ($item['oss_supply_type'] ?? '');
+        $supplyType = in_array($supplyType, ['goods', 'services'], true) ? $supplyType : null;
+
+        $rate = isset($item['oss_exchange_rate']) && is_numeric($item['oss_exchange_rate'])
+            ? (float) $item['oss_exchange_rate']
+            : null;
+        $rateDate = self::dateOrNull($item['oss_exchange_rate_date'] ?? null);
+        $taxable = isset($item['oss_taxable_amount_return']) && is_numeric($item['oss_taxable_amount_return'])
+            ? (float) $item['oss_taxable_amount_return']
+            : null;
+        $vat = isset($item['oss_vat_amount_return']) && is_numeric($item['oss_vat_amount_return'])
+            ? (float) $item['oss_vat_amount_return']
+            : null;
+        $period = trim((string) ($item['oss_original_period'] ?? ''));
+        if ($period !== '' && (!preg_match('/^[0-9]{4}Q[1-4]$/', $period) || $period < '2021Q3')) {
+            $period = '';
+        }
+        $period = $period !== '' ? $period : null;
+
+        return [$applicable, $country, $rateType, $supplyType, $rate, $rateDate, $taxable, $vat, $period];
+    }
+
+    private static function dateOrNull(mixed $value): ?string
+    {
+        $value = trim((string) ($value ?? ''));
+        return preg_match('/^\d{4}-\d{2}-\d{2}$/', $value) ? $value : null;
     }
 
     /**
@@ -1106,6 +1237,20 @@ final class InvoiceRepository
     }
 
     /**
+     * Sazba → stát. Validace potřebuje zemi, aby zahraniční sazba neprošla na řádku bez OSS
+     * (jinak by ji tuzemská evidence vykázala jako českou — viz InvoiceValidation).
+     *
+     * @return array<int, string>
+     */
+    public function vatRateCountryMap(): array
+    {
+        $rows = $this->db->pdo()->query('SELECT id, country FROM vat_rates')->fetchAll(PDO::FETCH_ASSOC);
+        $out = [];
+        foreach ($rows as $r) $out[(int) $r['id']] = strtoupper((string) ($r['country'] ?? 'CZ'));
+        return $out;
+    }
+
+    /**
      * Je odběratel zahraniční z EU? Pro country-aware klasifikaci RC:
      * tuzemský odběratel + reverse_charge = §92a (ř.25), zahraniční EU = dodání do JČS (ř.20).
      */
@@ -1167,7 +1312,31 @@ final class InvoiceRepository
         if (array_key_exists('revenue_category_id', $row)) {
             $row['revenue_category_id'] = $row['revenue_category_id'] !== null ? (int) $row['revenue_category_id'] : null;
         }
+        if (array_key_exists('branding_profile_id', $row)) {
+            $row['branding_profile_id'] = $row['branding_profile_id'] !== null ? (int) $row['branding_profile_id'] : null;
+        }
         return $row;
+    }
+
+    private function resolveBrandingProfileId(mixed $value, int $supplierId): ?int
+    {
+        if ($value === null || $value === '') {
+            $stmt = $this->db->pdo()->prepare('SELECT CASE WHEN branding_profiles_enabled = 1 THEN default_branding_profile_id ELSE NULL END FROM supplier WHERE id = ?');
+            $stmt->execute([$supplierId]);
+            $default = $stmt->fetchColumn();
+            return $default !== false && $default !== null ? (int) $default : null;
+        }
+        $id = (int) $value;
+        $stmt = $this->db->pdo()->prepare(
+            'SELECT bp.id FROM branding_profiles bp
+               JOIN supplier s ON s.id = bp.supplier_id AND s.branding_profiles_enabled = 1
+              WHERE bp.id = ? AND bp.supplier_id = ? AND bp.is_active = 1'
+        );
+        $stmt->execute([$id, $supplierId]);
+        if ($stmt->fetchColumn() === false) {
+            throw new \InvalidArgumentException("Brandingový profil #$id nenalezen.");
+        }
+        return $id;
     }
 
     /**
@@ -1304,6 +1473,76 @@ final class InvoiceRepository
         $id = $stmt->fetchColumn();
         if ($id === false) return null;
         return $this->find((int) $id);
+    }
+
+    /**
+     * Vrátí public_token faktury (web faktura); pokud ještě neexistuje, vygeneruje
+     * ho — bin2hex(random_bytes(24)) → 48 hex znaků (vzor approval_token).
+     * UPDATE podmíněný `public_token IS NULL` serializuje souběžné ensure — vyhraje
+     * první zápis, druhý si token přečte znovu.
+     */
+    public function ensurePublicToken(int $invoiceId): string
+    {
+        $pdo = $this->db->pdo();
+        $sel = $pdo->prepare('SELECT public_token FROM invoices WHERE id = ?');
+        $sel->execute([$invoiceId]);
+        $existing = $sel->fetchColumn();
+        if (is_string($existing) && $existing !== '') {
+            return $existing;
+        }
+
+        $token = bin2hex(random_bytes(24));
+        $upd = $pdo->prepare('UPDATE invoices SET public_token = ? WHERE id = ? AND public_token IS NULL');
+        $upd->execute([$token, $invoiceId]);
+        if ($upd->rowCount() === 1) {
+            return $token;
+        }
+        $sel->execute([$invoiceId]);
+        return (string) $sel->fetchColumn();
+    }
+
+    /**
+     * Zneplatní stávající veřejný odkaz vygenerováním nového tokenu (stará URL
+     * přestane platit). public_viewed_at se resetuje — vztahuje se k aktuálnímu odkazu.
+     */
+    public function regeneratePublicToken(int $invoiceId): string
+    {
+        $token = bin2hex(random_bytes(24));
+        $this->db->pdo()->prepare(
+            'UPDATE invoices SET public_token = ?, public_viewed_at = NULL WHERE id = ?'
+        )->execute([$token, $invoiceId]);
+        return $token;
+    }
+
+    /**
+     * Lehká reference veřejně viditelné faktury podle public_token, nebo null.
+     * Pravidlo viditelnosti (draft se nezobrazuje) je přímo v SQL, aby ho
+     * konzument nemohl zapomenout (vzor findByApprovalToken s expirací).
+     *
+     * @return array{id:int, supplier_id:int}|null
+     */
+    public function publicInvoiceRefByToken(string $token): ?array
+    {
+        $stmt = $this->db->pdo()->prepare(
+            "SELECT id, supplier_id FROM invoices WHERE public_token = ? AND status <> 'draft'"
+        );
+        $stmt->execute([$token]);
+        $row = $stmt->fetch(PDO::FETCH_ASSOC);
+        return $row === false ? null : ['id' => (int) $row['id'], 'supplier_id' => (int) $row['supplier_id']];
+    }
+
+    /** Najde veřejně viditelnou fakturu podle public_token (web faktura), nebo null. */
+    public function findByPublicToken(string $token): ?array
+    {
+        $ref = $this->publicInvoiceRefByToken($token);
+        return $ref === null ? null : $this->find($ref['id']);
+    }
+
+    /** Zaznamená zobrazení web faktury klientem (poslední anonymní přístup). */
+    public function markPublicViewed(int $invoiceId): void
+    {
+        $this->db->pdo()->prepare('UPDATE invoices SET public_viewed_at = NOW() WHERE id = ?')
+            ->execute([$invoiceId]);
     }
 
     /**
@@ -1462,6 +1701,12 @@ final class InvoiceRepository
         }
         $row['linked_work_report_id'] = $row['linked_work_report_id'] !== null ? (int) $row['linked_work_report_id'] : null;
         $row['item_kind'] = (string) ($row['item_kind'] ?? 'standard');
+        if (array_key_exists('oss_applicable', $row)) {
+            $row['oss_applicable'] = (bool) $row['oss_applicable'];
+            foreach (['oss_exchange_rate', 'oss_taxable_amount_return', 'oss_vat_amount_return'] as $f) {
+                $row[$f] = $row[$f] !== null ? (float) $row[$f] : null;
+            }
+        }
         return $row;
     }
 

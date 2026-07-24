@@ -42,7 +42,7 @@ use MyInvoice\Repository\TaxConstantsRepository;
  *   counterparty_name:string, counterparty_dic:?string, country_iso2:?string,
  *   code:?string, dphdp3_line:?string, dphdp3_line_secondary:?string, kh_section:?string,
  *   is_reverse_charge:bool, vat_deduction_partial:bool, vat_rate:float, base_czk:float, vat_czk:float,
- *   total_with_vat_czk:float, is_fixed_asset:bool, exchange_rate:float
+ *   total_with_vat_czk:float, is_fixed_asset:bool, exchange_rate:float, exchange_rate_missing:bool
  * }
  */
 final class VatLedgerService
@@ -110,6 +110,9 @@ final class VatLedgerService
     private function fetchSales(int $supplierId, string $start, string $end, bool $includeDrafts): array
     {
         $statusFilter = $includeDrafts ? "i.status != 'cancelled'" : "i.status NOT IN ('draft', 'cancelled')";
+        $ossFilter = $this->db->hasColumn('invoice_items', 'oss_applicable')
+            ? 'AND COALESCE(ii.oss_applicable, 0) = 0'
+            : '';
         // Práh základní/snížená sazba pro fallback klasifikaci — per rok období
         // (číselník daňových konstant, ne natvrdo 20.5).
         $bucket = $this->taxConstants->vatBucketThreshold((int) substr($start, 0, 4));
@@ -117,7 +120,9 @@ final class VatLedgerService
             SELECT i.id AS invoice_id, i.varsymbol AS doc_number, i.varsymbol AS vendor_invoice_number,
                    i.invoice_type AS document_kind, i.status,
                    COALESCE(i.tax_date, i.issue_date) AS tax_date, i.issue_date,
-                   COALESCE(i.exchange_rate, 1) AS exchange_rate, COALESCE(cur.code, 'CZK') AS currency,
+                   -- RAW kurz (bez COALESCE ...,1) — normalize() rozliší chybějící kurz
+                   -- od CZK a nastaví příznak exchange_rate_missing (issue #238).
+                   i.exchange_rate AS exchange_rate, COALESCE(cur.code, 'CZK') AS currency,
                    i.total_with_vat AS inv_total, i.reverse_charge AS rc_flag,
                    c.company_name AS counterparty_name, c.dic AS counterparty_dic,
                    co.iso2 AS country_iso2, COALESCE(co.is_eu, 0) AS country_is_eu,
@@ -153,6 +158,7 @@ final class VatLedgerService
              WHERE i.supplier_id = ?
                AND {$statusFilter}
                AND i.invoice_type != 'proforma'
+               {$ossFilter}
                AND COALESCE(i.tax_date, i.issue_date) BETWEEN ? AND ?
           ORDER BY COALESCE(i.tax_date, i.issue_date), i.id, ii.id
         ");
@@ -181,7 +187,8 @@ final class VatLedgerService
             SELECT pi.id AS invoice_id, pi.varsymbol AS doc_number, pi.vendor_invoice_number,
                    pi.document_kind, pi.status,
                    COALESCE(pi.tax_date, pi.issue_date) AS tax_date, pi.issue_date,
-                   COALESCE(pi.exchange_rate, 1) AS exchange_rate, COALESCE(cur.code, 'CZK') AS currency,
+                   -- RAW kurz (bez COALESCE ...,1) — viz fetchSales / normalize() (issue #238).
+                   pi.exchange_rate AS exchange_rate, COALESCE(cur.code, 'CZK') AS currency,
                    pi.total_with_vat AS inv_total, pi.reverse_charge AS rc_flag,
                    pi.vat_deduction, pi.vat_deduction_percent,
                    c.company_name AS counterparty_name, c.dic AS counterparty_dic,
@@ -297,7 +304,14 @@ final class VatLedgerService
      */
     private function normalize(array $r, string $source, array $map, float $bucket): array
     {
-        $rate = ($r['currency'] === 'CZK' || !$r['exchange_rate']) ? 1.0 : (float) $r['exchange_rate'];
+        // Kurz: CZK = 1.0. U cizí měny bez zafixovaného kurzu (NULL / ≤0) použijeme
+        // náhradní 1.0, aby ne-daňové konzumenty (CRM náklady, trendy) nespadly, ALE
+        // ZÁROVEŇ nastavíme příznak exchange_rate_missing — daňové XML výstupy (DPH/KH/SH)
+        // ho detekují a export zastaví (issue #238), protože 1.0 by tiše vykázalo EUR jako CZK.
+        $isCzk = $r['currency'] === 'CZK';
+        $rawRate = $r['exchange_rate'] === null ? null : (float) $r['exchange_rate'];
+        $exchangeRateMissing = !$isCzk && ($rawRate === null || $rawRate <= 0.0);
+        $rate = ($isCzk || $rawRate === null || $rawRate <= 0.0) ? 1.0 : $rawRate;
         $vatRate = (float) $r['vat_rate'];
         $baseRaw = (float) $r['base'];
         $vatRaw = (float) $r['vat'];
@@ -408,6 +422,55 @@ final class VatLedgerService
             'total_with_vat_czk'    => round((float) $r['inv_total'] * $rate, 2),
             'is_fixed_asset'        => (bool) $r['is_fixed_asset'],
             'exchange_rate'         => $rate,
+            'exchange_rate_missing' => $exchangeRateMissing,
         ];
+    }
+
+    /**
+     * Daňová pojistka (issue #238): non-CZK řádek bez zafixovaného kurzu se ve
+     * VatLedgeru dopočítá náhradním kurzem 1.0 → cizoměnový základ by se tiše vykázal
+     * jako CZK. Vrací DISTINCT doklady (per zdroj+faktura) bez kurzu — akce si je při
+     * stažení doplní z ČNB (MissingExchangeRateFiller), náhled je jen vypíše jako varování.
+     *
+     * @param list<array<string,mixed>> $rows kanonické řádky z rows()
+     * @return list<array{invoice_id:int, source:string, currency:string, tax_date:?string, issue_date:?string, doc:string}>
+     */
+    public static function missingExchangeRateRows(array $rows): array
+    {
+        $out = [];
+        foreach ($rows as $r) {
+            if (empty($r['exchange_rate_missing'])) {
+                continue;
+            }
+            $key = (string) ($r['source'] ?? '') . ':' . (string) ($r['invoice_id'] ?? '0');
+            if (isset($out[$key])) {
+                continue;
+            }
+            $doc = (string) ($r['vendor_invoice_number'] ?? $r['doc_number'] ?? '')
+                ?: ('#' . (string) ($r['invoice_id'] ?? '?'));
+            $out[$key] = [
+                'invoice_id' => (int) ($r['invoice_id'] ?? 0),
+                'source'     => (string) ($r['source'] ?? ''),
+                'currency'   => (string) ($r['currency'] ?? ''),
+                'tax_date'   => isset($r['tax_date']) ? (string) $r['tax_date'] : null,
+                'issue_date' => isset($r['issue_date']) ? (string) $r['issue_date'] : null,
+                'doc'        => $doc,
+            ];
+        }
+        return array_values($out);
+    }
+
+    /**
+     * Popisné labely „doklad (měna)" z výstupu missingExchangeRateRows() — pro varování/chybu.
+     *
+     * @param list<array{doc:string, currency:string}> $missingRows
+     * @return list<string>
+     */
+    public static function missingExchangeRateLabels(array $missingRows): array
+    {
+        return array_values(array_map(
+            static fn (array $r): string => $r['doc'] . ' (' . $r['currency'] . ')',
+            $missingRows,
+        ));
     }
 }

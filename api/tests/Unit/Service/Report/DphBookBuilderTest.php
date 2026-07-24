@@ -123,7 +123,8 @@ final class DphBookBuilderTest extends TestCase
         )");
         $this->pdo->exec("CREATE TABLE invoice_items (
             id INTEGER PRIMARY KEY, invoice_id INTEGER NOT NULL, vat_rate_snapshot REAL NOT NULL,
-            description TEXT NULL, total_without_vat REAL NOT NULL, total_vat REAL NOT NULL, vat_classification_code TEXT NULL
+            description TEXT NULL, total_without_vat REAL NOT NULL, total_vat REAL NOT NULL,
+            vat_classification_code TEXT NULL, oss_applicable INTEGER NOT NULL DEFAULT 0
         )");
     }
 
