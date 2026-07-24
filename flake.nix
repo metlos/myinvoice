@@ -503,16 +503,16 @@
               };
 
               # Inject secrets into the phpfpm master process; workers inherit via clear_env=no.
+              # requires (not just after) myinvoice-migrate.service: a failed migration must
+              # block startup instead of serving requests against a stale/empty schema.
               systemd.services.phpfpm-myinvoice = {
-                requires = [ "myinvoice-env-setup.service" ];
-                after    = [ "myinvoice-env-setup.service" ];
+                requires = [ "myinvoice-env-setup.service" "myinvoice-migrate.service" ];
+                after    = [ "myinvoice-env-setup.service" "myinvoice-migrate.service" ];
                 serviceConfig.EnvironmentFile = "/run/myinvoice/env";
               };
 
               systemd.services.myinvoice-migrate = {
                 description     = "MyInvoice DB migrations";
-                wantedBy        = [ "phpfpm-myinvoice.service" ];
-                before          = [ "phpfpm-myinvoice.service" ];
                 requires        = [ "myinvoice-env-setup.service" ];
                 after           = [ "network.target" "myinvoice-env-setup.service" ];
                 serviceConfig   = {
