@@ -62,7 +62,7 @@
               inherit (finalAttrs) pname version src;
               pnpm = buildPkgs.pnpm_10;
               fetcherVersion = 3;
-              hash = "sha256-MDqCnbtFv4XjkqUmTZDzVsVsrL+s0qM30kbE2hQssY0="; # @pnpm-deps-hash (auto-updated by CI)
+              hash = "sha256-Iqd0AgO7V63Nyo8UJebaXz2SW4dmpQrAjui2IHbYIz8="; # @pnpm-deps-hash (auto-updated by CI)
             };
 
             nativeBuildInputs = [ buildPkgs.nodejs_24 buildPkgs.pnpm_10 buildPkgs.pnpmConfigHook ];
@@ -89,7 +89,7 @@
             pname = "myinvoice-api";
             inherit version;
             src = ./api;
-            vendorHash = "sha256-wfR06sAFfXJhs3N7pMBr0hp2f3bVtRZeFgxFcQtHoRU="; # @composer-vendor-hash (auto-updated by CI)
+            vendorHash = "sha256-SXmYQEDOnWGTqFAwFckYueH1uYd+zJHchAzQaVre7KE="; # @composer-vendor-hash (auto-updated by CI)
           });
 
           # 3) Kompletní nasaditelný strom aplikace (docroot = root, viz .htaccess).

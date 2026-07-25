@@ -47,7 +47,7 @@ refresh() {
   local attr="$1" marker="$2" got
   echo "→ ${attr} (${marker})"
   sed -i -E "s|\"sha256-[A-Za-z0-9+/=]+\";( # ${marker})|\"${FAKE}\";\1|" "$FLAKE"
-  got="$(${NIX} build "${PROJECT_ROOT}#${attr}" --no-link 2>&1 >/dev/null |
+  got="$(${NIX} build "${PROJECT_ROOT}#${attr}" --no-link 2>&1 |
     grep -oE 'got: +sha256-[A-Za-z0-9+/=]+' | awk '{print $2}' | head -n1 || true)"
   if [ -z "${got}" ]; then
     echo "  ✗ nepodařilo se zjistit hash pro .#${attr}" >&2
